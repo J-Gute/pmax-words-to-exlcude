@@ -1,6 +1,6 @@
 /**
  * Enhanced Performance Max Placement Quality Assessment Script
- * @version 5.7
+ * @version 5.8
  */
 
 // Configuration
@@ -12,7 +12,7 @@ const DNS_TIMEOUT_SECONDS = 5;
 
 // Auto-exclusion configuration
 const ADD_TO_ACCOUNT_EXCLUSIONS = true; // Set to false to disable automatic account-level exclusions
-const AUTO_EXCLUSION_THRESHOLD = 0.2; // Add to exclusions if score falls below this threshold
+const AUTO_EXCLUSION_THRESHOLD = 0.3; // Add to exclusions if score falls below this threshold
 const DRY_RUN_MODE = true; // Set to true to see what would be excluded without actually excluding
 
 const QUALITY_LABELS = {
@@ -28,48 +28,135 @@ const QUALITY_THRESHOLDS = {
 };
 
 /**
- * Cache Manager for External Data
+ * Enhanced Cache Manager for External Data with size optimization
  */
 class CacheManager {
     constructor() {
         this.cache = PropertiesService.getScriptProperties();
         this.cacheExpiryHours = 24 * 14; // 2 weeks
+        this.maxPropertySize = 8000; // Safe limit for PropertiesService (9KB limit)
     }
 
     getCachedData(key) {
         try {
-            const cachedItem = this.cache.getProperty(key);
-            if (!cachedItem) return null;
+            const cacheInfo = this.cache.getProperty(`${key}_info`);
+            if (!cacheInfo) return null;
             
-            const parsed = JSON.parse(cachedItem);
+            const info = JSON.parse(cacheInfo);
             const now = new Date().getTime();
             
-            if (now - parsed.timestamp > this.cacheExpiryHours * 60 * 60 * 1000) {
-                this.cache.deleteProperty(key);
+            if (now - info.timestamp > this.cacheExpiryHours * 60 * 60 * 1000) {
+                this.deleteCachedData(key);
                 return null;
             }
             
-            return parsed.data;
+            // Reconstruct data from chunks
+            const chunks = [];
+            for (let i = 0; i < info.chunks; i++) {
+                const chunk = this.cache.getProperty(`${key}_${i}`);
+                if (!chunk) {
+                    console.log(`Missing chunk ${i} for ${key}, clearing cache`);
+                    this.deleteCachedData(key);
+                    return null;
+                }
+                chunks.push(chunk);
+            }
+            
+            const reconstructed = chunks.join('');
+            return JSON.parse(reconstructed);
         } catch (error) {
             console.log(`Cache read error for ${key}: ${error.message}`);
+            this.deleteCachedData(key);
             return null;
         }
     }
 
     setCachedData(key, data) {
         try {
-            const cacheItem = {
-                data: data,
-                timestamp: new Date().getTime()
+            const serialized = JSON.stringify(data);
+            const chunks = this.chunkString(serialized, this.maxPropertySize);
+            
+            // Clear any existing data first
+            this.deleteCachedData(key);
+            
+            // Store chunks
+            for (let i = 0; i < chunks.length; i++) {
+                this.cache.setProperty(`${key}_${i}`, chunks[i]);
+            }
+            
+            // Store metadata
+            const info = {
+                chunks: chunks.length,
+                timestamp: new Date().getTime(),
+                size: serialized.length
             };
-            this.cache.setProperty(key, JSON.stringify(cacheItem));
+            this.cache.setProperty(`${key}_info`, JSON.stringify(info));
+            
+            console.log(`Cached ${key}: ${chunks.length} chunks, ${serialized.length} bytes`);
         } catch (error) {
             console.log(`Cache write error for ${key}: ${error.message}`);
+            this.deleteCachedData(key);
         }
+    }
+
+    deleteCachedData(key) {
+        try {
+            const cacheInfo = this.cache.getProperty(`${key}_info`);
+            if (cacheInfo) {
+                const info = JSON.parse(cacheInfo);
+                for (let i = 0; i < info.chunks; i++) {
+                    this.cache.deleteProperty(`${key}_${i}`);
+                }
+            }
+            this.cache.deleteProperty(`${key}_info`);
+        } catch (error) {
+            console.log(`Cache delete error for ${key}: ${error.message}`);
+        }
+    }
+
+    chunkString(str, chunkSize) {
+        const chunks = [];
+        for (let i = 0; i < str.length; i += chunkSize) {
+            chunks.push(str.slice(i, i + chunkSize));
+        }
+        return chunks;
     }
 
     shouldRefreshCache(key) {
         return this.getCachedData(key) === null;
+    }
+
+    getCacheStats() {
+        try {
+            const allKeys = this.cache.getKeys();
+            const stats = {
+                totalKeys: allKeys.length,
+                cacheKeys: [],
+                totalSize: 0
+            };
+            
+            const infoKeys = allKeys.filter(key => key.endsWith('_info'));
+            for (const infoKey of infoKeys) {
+                try {
+                    const info = JSON.parse(this.cache.getProperty(infoKey));
+                    const baseKey = infoKey.replace('_info', '');
+                    stats.cacheKeys.push({
+                        key: baseKey,
+                        chunks: info.chunks,
+                        size: info.size,
+                        age: Math.round((new Date().getTime() - info.timestamp) / (1000 * 60 * 60)) + 'h'
+                    });
+                    stats.totalSize += info.size;
+                } catch (e) {
+                    // Skip invalid entries
+                }
+            }
+            
+            return stats;
+        } catch (error) {
+            console.log(`Error getting cache stats: ${error.message}`);
+            return { totalKeys: 0, cacheKeys: [], totalSize: 0 };
+        }
     }
 }
 
@@ -229,7 +316,7 @@ class AccountExclusionManager {
 }
 
 /**
- * Enhanced Blocklist Manager Class with IP Blacklist Support and Caching
+ * Enhanced Blocklist Manager Class with optimized caching
  */
 class BlocklistManager {
     constructor() {
@@ -338,7 +425,8 @@ class BlocklistManager {
         if (successfulFetches === 0) {
             this.initializeFallbackBlocklist();
         } else {
-            // Cache the results
+            // Cache the results using chunked storage
+            console.log('Caching blocklist data...');
             this.cacheManager.setCachedData('blocklist_domains', Array.from(this.blockedDomains));
             this.cacheManager.setCachedData('blocklist_ips', Array.from(this.blockedIPs));
         }
@@ -555,6 +643,8 @@ class KeywordConfiguration {
         return this.SPAM_KEYWORDS || [];
     }
 }
+
+// [Rest of the classes remain the same: TFIDFMetaAnalyzer, EnterpriseURLQualityAssessor]
 
 class TFIDFMetaAnalyzer {
     constructor() {
@@ -1493,6 +1583,8 @@ function getDateRange(lookbackDays) {
     };
 }
 
+// ... [Include all remaining classes unchanged] ...
+
 async function main() {
     const startTime = new Date();
     console.log('Starting Enhanced Performance Max Placement Analysis...');
@@ -1502,6 +1594,16 @@ async function main() {
     console.log(`Add to Account Exclusions: ${ADD_TO_ACCOUNT_EXCLUSIONS}`);
     console.log(`Auto-Exclusion Threshold: ${AUTO_EXCLUSION_THRESHOLD}`);
     console.log(`Dry Run Mode: ${DRY_RUN_MODE}`);
+    
+    // Initialize cache manager and show cache stats
+    const cacheManager = new CacheManager();
+    const cacheStats = cacheManager.getCacheStats();
+    console.log(`\n=== CACHE STATUS ===`);
+    console.log(`Total cache entries: ${cacheStats.totalKeys}`);
+    console.log(`Cached data size: ${Math.round(cacheStats.totalSize / 1024)}KB`);
+    cacheStats.cacheKeys.forEach(item => {
+        console.log(`- ${item.key}: ${item.chunks} chunks, ${Math.round(item.size / 1024)}KB, ${item.age} old`);
+    });
     
     // Initialize configurations
     if (typeof globalThis.keywordConfig === 'undefined') {
@@ -1610,6 +1712,7 @@ async function main() {
         const blocklistStats = globalThis.blocklistManager.getBlocklistStats();
         const spamKeywordsCount = globalThis.keywordConfig?.getSpamKeywords()?.length || 0;
         const exclusionResults = exclusionManager.getExclusionResults();
+        const finalCacheStats = cacheManager.getCacheStats();
         
         console.log(`\n=== ANALYSIS SUMMARY ===`);
         console.log(`Total Unique URLs: ${uniqueUrls.size}`);
@@ -1621,6 +1724,7 @@ async function main() {
         console.log(`External Domains: ${blocklistStats.totalDomains}`);
         console.log(`External IPs: ${blocklistStats.totalIPs}`);
         console.log(`Spam Keywords: ${spamKeywordsCount}`);
+        console.log(`Cache Size: ${Math.round(finalCacheStats.totalSize / 1024)}KB`);
         console.log(`Runtime: ${runtime}s`);
         
         outputToGoogleSheets(allResults, analysisResults, {
@@ -1632,6 +1736,7 @@ async function main() {
             spamKeywordsCount,
             exclusionCandidates: placementsForExclusion.length,
             exclusionResults,
+            cacheStats: finalCacheStats,
             runtime,
             accountName,
             dateRange,
@@ -1673,6 +1778,7 @@ function outputToGoogleSheets(allResults, analysisResults, summary) {
             [`External Blocklist Domains: ${summary.blocklistStats.totalDomains}`],
             [`External Blocklist IPs: ${summary.blocklistStats.totalIPs}`],
             [`Spam Keywords: ${summary.spamKeywordsCount}`],
+            [`Cache Size: ${Math.round(summary.cacheStats.totalSize / 1024)}KB`],
             [`Blocklist Matches: ${summary.blocklistMatchCount}`],
             [`Source: https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/spam-and-irrelevant-terms`]
         ];
@@ -1681,7 +1787,7 @@ function outputToGoogleSheets(allResults, analysisResults, summary) {
         
         // Analysis headers and data
         const headers = ['Campaign ID', 'URL', 'Placement Type', 'Impressions', 'Quality Score', 'Suggestion', 'Reason(s)', 'Content Analysis', 'Flagged Terms'];
-        const headerRow = 20;
+        const headerRow = 21;
         
         analysisSheet.getRange(headerRow, 1, 1, headers.length).setValues([headers]);
         analysisSheet.getRange(headerRow, 1, 1, headers.length)
