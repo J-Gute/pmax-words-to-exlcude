@@ -4,16 +4,16 @@
  */
 
 // Configuration
-const SPREADSHEET_URL = 'URL Here';
-const LOOKBACK_WINDOW = 10;
+const SPREADSHEET_URL = 'url here';
+const LOOKBACK_WINDOW = 7;
 const MIN_IMPRESSIONS = 3;
-const URL_TIMEOUT_SECONDS = 30;
+const URL_TIMEOUT_SECONDS = 20;
 const DNS_TIMEOUT_SECONDS = 5;
 
 // Auto-exclusion configuration
 const ADD_TO_ACCOUNT_EXCLUSIONS = true; // Set to false to disable automatic account-level exclusions
 const AUTO_EXCLUSION_THRESHOLD = 0.3; // Add to exclusions if score falls below this threshold
-const DRY_RUN_MODE = true; // Set to true to see what would be excluded without actually excluding
+const DRY_RUN_MODE = false; // Set to true to see what would be excluded without actually excluding
 
 const QUALITY_LABELS = {
     HIGH_QUALITY: 'LIKELY KEEP',
@@ -657,39 +657,68 @@ class TFIDFMetaAnalyzer {
         // Dynamic spam patterns that will be built from external keywords
         this.spamPatterns = [];
         this.initializeBasePatterns();
+        
+        // Whitelist of legitimate terms that might contain spam substrings
+        this.legitimateTerms = new Set([
+            'analytics', 'analysis', 'analyst', 'analyze', 'analytical',
+            'technical', 'mechanical', 'electrical', 'chemical',
+            'physical', 'medical', 'practical', 'statistical', 'mathematical',
+            'technological','economical', 'political',
+            'development', 'government', 'improvement',
+            'advertisement', 'establishment', 'assessment', 'investment',
+            'professional', 'educational', 'international', 'operational',
+            'organizational', 'informational', 'functional'
+        ]);
     }
 
     initializeBasePatterns() {
-        // Base patterns for common obfuscation techniques
+        // Base patterns for common obfuscation techniques with improved word boundaries
         this.spamPatterns = [
-            // Critical patterns
-            /\b(free|fr33|f r e e|freee)\b/gi,
-            /\b(win|w1n|winn|winner|winning)\s*(money|cash|big|prizes?)/gi,
-            /\b(casino|poker|lottery|gambling|bet|betting)\b/gi,
-            /\b(adult|xxx|porn|sex|dating|singles)\b/gi,
-            /\b(earn|make)\s*(money|cash|\$)\s*(fast|quick|easy|now)/gi,
-            /\b(miracle|amazing|incredible|shocking|unbelievable)\b/gi,
-            /\b(limited\s*time|act\s*now|hurry|urgent|expires?)\b/gi,
-            /\b(guarantee|guaranteed|risk\s*free|no\s*risk)\b/gi,
+            // Critical patterns with strict word boundaries
+            /\b(?:free|fr33|f\s*r\s*e\s*e|freee)\b/gi,
+            /\b(?:win|w1n|winn|winner|winning)\s*(?:money|cash|big|prizes?)\b/gi,
+            /\b(?:casino|poker|lottery|gambling|bet|betting)\b/gi,
+            /\b(?:adult|xxx|porn|sex|dating|singles)\b/gi,
+            /\b(?:earn|make)\s*(?:money|cash|\$)\s*(?:fast|quick|easy|now)\b/gi,
+            /\b(?:miracle|amazing|incredible|shocking|unbelievable)\b/gi,
+            /\b(?:limited\s*time|act\s*now|hurry|urgent|expires?)\b/gi,
+            /\b(?:guarantee|guaranteed|risk\s*free|no\s*risk)\b/gi,
             
-            // Obfuscation patterns
-            /\b(fr[3e]{2,}|f[r3]{2,}e|fre{3,})\b/gi,
-            /\b(w[1i]{2,}n|wi{2,}n|w1nn?)\b/gi,
-            /\b(m[0o]{2,}ney|mon[3e]{2,}y|m0n3y)\b/gi,
-            /\b(c[4a]{2,}sh|ca[5s]{2,}h|c4sh)\b/gi
+            // Obfuscation patterns with word boundaries
+            /\b(?:fr[3e]{2,}|f[r3]{2,}e|fre{3,})\b/gi,
+            /\b(?:w[1i]{2,}n|wi{2,}n|w1nn?)\b/gi,
+            /\b(?:m[0o]{2,}ney|mon[3e]{2,}y|m0n3y)\b/gi,
+            /\b(?:c[4a]{2,}sh|ca[5s]{2,}h|c4sh)\b/gi
         ];
     }
 
     buildDynamicSpamPatterns() {
-        // Build additional patterns from external spam keywords
+        // Build additional patterns from external spam keywords with improved matching
         const spamKeywords = globalThis.keywordConfig?.getSpamKeywords() || [];
         
         spamKeywords.forEach(keyword => {
             if (keyword.length > 2) {
-                // Create regex pattern for exact matches with word boundaries
-                const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const pattern = new RegExp(`\\b${escapedKeyword}\\b`, 'gi');
-                this.spamPatterns.push(pattern);
+                // Skip if keyword is a substring of a legitimate term
+                const isLegitimateSubstring = Array.from(this.legitimateTerms).some(legitTerm => 
+                    legitTerm.toLowerCase().includes(keyword.toLowerCase()) && 
+                    legitTerm.toLowerCase() !== keyword.toLowerCase()
+                );
+                
+                if (!isLegitimateSubstring) {
+                    // Create regex pattern with strict word boundaries
+                    const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    
+                    // For short keywords (3-4 chars), use stricter matching
+                    if (keyword.length <= 4) {
+                        // Only match if surrounded by non-letter characters or at word boundaries
+                        const pattern = new RegExp(`(?:^|\\W)(${escapedKeyword})(?=\\W|$)`, 'gi');
+                        this.spamPatterns.push(pattern);
+                    } else {
+                        // For longer keywords, use standard word boundary matching
+                        const pattern = new RegExp(`\\b${escapedKeyword}\\b`, 'gi');
+                        this.spamPatterns.push(pattern);
+                    }
+                }
             }
         });
         
@@ -714,7 +743,8 @@ class TFIDFMetaAnalyzer {
             combinedKeywords: this.generateCombinedKeywords(tfidfKeywords, spamAnalysis),
             spamScore: spamAnalysis.totalSpamScore,
             professionalScore: this.calculateProfessionalScore(allText),
-            detectedSpamKeywords: spamAnalysis.detectedSpamKeywords || []
+            detectedSpamKeywords: spamAnalysis.detectedSpamKeywords || [],
+            allKeywords: tfidfKeywords.map(k => k.term) // All keywords for reasons output
         };
     }
 
@@ -749,7 +779,7 @@ class TFIDFMetaAnalyzer {
 
         return Object.entries(termFreq)
             .sort((a, b) => b[1] - a[1])
-            .slice(0, 5)
+            .slice(0, 10) // Get more keywords for reasons output
             .map(([term, frequency]) => ({ term, frequency }));
     }
 
@@ -771,17 +801,41 @@ class TFIDFMetaAnalyzer {
         this.spamPatterns.forEach((pattern, index) => {
             const matches = text.match(pattern) || [];
             if (matches.length > 0) {
-                const score = matches.length * (index < 8 ? -2.0 : -1.6); // Critical vs obfuscation
-                spamResults.criticalSpam.push({ pattern: pattern.toString(), matches: matches.length, score });
-                spamResults.totalSpamScore += score;
-                spamResults.spamFlags.push('SPAM_DETECTED');
-                
-                // Add detected spam keywords
-                matches.forEach(match => {
-                    if (!spamResults.detectedSpamKeywords.includes(match.toLowerCase())) {
-                        spamResults.detectedSpamKeywords.push(match.toLowerCase());
-                    }
+                // Filter out matches that are part of legitimate terms
+                const validMatches = matches.filter(match => {
+                    const cleanMatch = match.replace(/^\W+|\W+$/g, '').toLowerCase(); // Remove leading/trailing non-word chars
+                    
+                    // Check if this match is part of a legitimate term
+                    const isPartOfLegitimate = Array.from(this.legitimateTerms).some(legitTerm => {
+                        const lowerLegit = legitTerm.toLowerCase();
+                        // Check if the legitimate term contains this match and appears in the text
+                        return lowerLegit.includes(cleanMatch) && 
+                               lowerLegit !== cleanMatch && 
+                               text.toLowerCase().includes(lowerLegit);
+                    });
+                    
+                    return !isPartOfLegitimate;
                 });
+                
+                if (validMatches.length > 0) {
+                    const score = validMatches.length * (index < 8 ? -2.0 : -1.6); // Critical vs obfuscation
+                    spamResults.criticalSpam.push({ 
+                        pattern: pattern.toString(), 
+                        matches: validMatches.length, 
+                        score,
+                        matchedTerms: validMatches
+                    });
+                    spamResults.totalSpamScore += score;
+                    spamResults.spamFlags.push('SPAM_DETECTED');
+                    
+                    // Add detected spam keywords (cleaned)
+                    validMatches.forEach(match => {
+                        const cleanMatch = match.replace(/^\W+|\W+$/g, '').toLowerCase();
+                        if (!spamResults.detectedSpamKeywords.includes(cleanMatch)) {
+                            spamResults.detectedSpamKeywords.push(cleanMatch);
+                        }
+                    });
+                }
             }
         });
         
@@ -809,6 +863,7 @@ class TFIDFMetaAnalyzer {
         
         if (spamAnalysis.criticalSpam.length === 0 && tfidfKeywords.length > 0) {
             const topKeywords = tfidfKeywords
+                .slice(0, 5)
                 .map(item => `${item.term}(${item.frequency})`)
                 .join(', ');
             keywords.push(`KEYWORDS: ${topKeywords}`);
@@ -1771,20 +1826,24 @@ function outputToGoogleSheets(allResults, analysisResults, summary) {
             [`Total Placements: ${summary.totalPlacements}`],
             [`Exclusion Recommendations: ${summary.lowQualityCount}`],
             [`Exclusion Candidates: ${summary.exclusionCandidates}`],
-            [`Actually Excluded: ${summary.exclusionResults.stats.successful}`],
-            [`Auto-Exclusions: ${ADD_TO_ACCOUNT_EXCLUSIONS ? (DRY_RUN_MODE ? 'DRY RUN' : 'ENABLED') : 'DISABLED'}`],
-            [`Exclusion Rate: ${Math.round((summary.lowQualityCount / summary.totalPlacements) * 100)}%`],
             [`Runtime: ${summary.runtime}s`],
             [`External Blocklist Domains: ${summary.blocklistStats.totalDomains}`],
             [`External Blocklist IPs: ${summary.blocklistStats.totalIPs}`],
             [`Spam Keywords: ${summary.spamKeywordsCount}`],
-            [`Cache Size: ${Math.round(summary.cacheStats.totalSize / 1024)}KB`],
             [`Blocklist Matches: ${summary.blocklistMatchCount}`],
-            [`Source: https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/spam-and-irrelevant-terms`]
+            [`'Spam'/Irrelevant Term Source: https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/spam-and-irrelevant-terms`],
+            [`Script Source: https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/pmax-placement-evaluator.gs`]
         ];
-        
+
         analysisSheet.getRange(4, 1, summaryData.length, 1).setValues(summaryData);
-        
+
+        // Add hyperlinks to the source URLs
+        const spamSourceRow = 4 + summaryData.length - 2; // Second to last row
+        const scriptSourceRow = 4 + summaryData.length - 1; // Last row
+
+        analysisSheet.getRange(spamSourceRow, 1).setFormula('=HYPERLINK("https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/spam-and-irrelevant-terms", "\'Spam\'/Irrelevant Term Source: https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/spam-and-irrelevant-terms")');
+        analysisSheet.getRange(scriptSourceRow, 1).setFormula('=HYPERLINK("https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/pmax-placement-evaluator.gs", "Script Source: https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/pmax-placement-evaluator.gs")');
+
         // Analysis headers and data
         const headers = ['Campaign ID', 'URL', 'Placement Type', 'Impressions', 'Quality Score', 'Suggestion', 'Reason(s)', 'Content Analysis', 'Flagged Terms'];
         const headerRow = 21;
