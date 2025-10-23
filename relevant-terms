@@ -973,6 +973,12 @@ service bom
 as built bom
 effectivity management
 change management
+ebom
+pbom
+bill of materials
+bom
+mbom
+sbom
 plm
 cad
 cam
