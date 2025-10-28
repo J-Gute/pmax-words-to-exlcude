@@ -1,1900 +1,1448 @@
 /**
- * Enhanced Performance Max Placement Quality Assessment Script
- * @version 5.8
+ * PMAX Placement Domain Analysis Script
+ * Fetches blacklists, analyzes PMAX placements, and flags suspicious domains
  */
 
 // Configuration
-const SPREADSHEET_URL = 'url here';
-const LOOKBACK_WINDOW = 7;
-const MIN_IMPRESSIONS = 3;
-const URL_TIMEOUT_SECONDS = 20;
-const DNS_TIMEOUT_SECONDS = 5;
-
-// Auto-exclusion configuration
-const ADD_TO_ACCOUNT_EXCLUSIONS = true; // Set to false to disable automatic account-level exclusions
-const AUTO_EXCLUSION_THRESHOLD = 0.3; // Add to exclusions if score falls below this threshold
-const DRY_RUN_MODE = false; // Set to true to see what would be excluded without actually excluding
-
-const QUALITY_LABELS = {
-    HIGH_QUALITY: 'LIKELY KEEP',
-    MEDIUM_QUALITY: 'LIKELY EXCLUDE', 
-    LOW_QUALITY: 'EXCLUDE'
+const CONFIG = {
+  SPAM_KEYWORDS: 'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/spam-and-irrelevant-terms',
+  WHITELIST_DOMAINS: 'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/whitelisted-domains.txt',
+  SUSPICIOUS_TLDS: [
+    'https://raw.githubusercontent.com/cbuijs/accomplist/main/suspicious-tlds/plain.black.tld.list',
+    'https://raw.githubusercontent.com/2004gixxer600/BlockLists/refs/heads/main/MaliciousDomain.txt',
+    'https://raw.githubusercontent.com/cbuijs/ut1/master/warez/domains',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/main/abuse-tlds/plain.black.domain.level-1.list.routedns',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/main/abuse-tlds/plain.black.domain.level-2.list.routedns',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/main/abuse-tlds/plain.black.domain.level-3.list.routedns',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/main/abuse-tlds/plain.black.domain.level-4.list.routedns'
+  ],
+  DOMAIN_BLOCKLIST: [
+    'https://raw.githubusercontent.com/cbuijs/accomplist/main/easylist/optimized.black.domain.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/malicious-dom/optimized.black.domain.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/typosquat/optimized.black.domain.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/main/adult-themed/plain.black.domain.level-3.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/main/crypto/optimized.black.domain.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/main/gambling/optimized.black.domain.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/main/games/optimized.black.domain.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/main/streaming/optimized.black.domain.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/amnestytech-investigations.list',
+    'https://raw.githubusercontent.com/romainmarcoux/malicious-domains/refs/heads/main/full-domains-aa.txt',
+    'https://raw.githubusercontent.com/Levi2288/AdvancedBlockList/refs/heads/main/Lists/adlist.txt',
+    'https://raw.githubusercontent.com/Levi2288/AdvancedBlockList/refs/heads/main/Lists/spam.txt',
+    'https://raw.githubusercontent.com/Levi2288/AdvancedBlockList/refs/heads/main/Lists/privacy.txt',
+    'https://raw.githubusercontent.com/Levi2288/AdvancedBlockList/refs/heads/main/Lists/abuse.txt',
+    'https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/domains/dga7.txt',
+    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/disw-mcc-exclusion-master-list',
+  ],
+  IP_BLOCKLIST: [
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/malicious-ip/plain.black.ipcidr.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/malicious-ip/plain.black.ip4cidr.list',
+    'https://raw.githubusercontent.com/stamparm/ipsum/refs/heads/master/levels/1.txt',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/amnestytech-investigations-ips.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/bad.abuse.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/black.brazil.ip.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/black.china.ip.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/black.japan.ip.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/bogons/plain.black.ipcidr.list',
+    'https://raw.githubusercontent.com/ShadowWhisperer/IPs/master/Malware/Hosting',
+    'https://raw.githubusercontent.com/sefinek/Malicious-IP-Addresses/main/lists/main.txt'
+  ],
+  
+  // Output configuration - REPLACE WITH YOUR SHEET URL
+  SHEET_URL: 'URL here',
+  DATES_BACK: 7,
+  MIN_IMPRESSIONS: 2,
+  DNS_BATCH_SIZE: 25,
+  MAX_RETRIES: 3,
+  
+  // Analysis configuration
+  SHORT_TERM_LENGTH: 6, 
+  WORD_BOUNDARY_CHARS: ['.', '-', '_', '/', '?', '&', '=', '+'], 
+  
+  // Auto-exclude placement types
+  AUTO_EXCLUDE_TYPES: ['YOUTUBE_VIDEO', 'MOBILE_APPLICATION'],
+  
+  // TLDs to filter out from suspicious lists (common legitimate TLDs)
+  FILTER_OUT_TLDS: ['com', 'org', 'edu', 'de', 'uk', 'fr', 'jp', 'kr', 'us', 'es', 'ch', 'ir', 'pl'],
+  
+  OPR_API_KEY: 'API key here',
+  OPR_BATCH_SIZE: 100, 
+  OPR_ENABLED: true,
 };
 
-const QUALITY_THRESHOLDS = {
-    HIGH_QUALITY: 0.85,
-    MEDIUM_QUALITY: 0.55,
-    LOW_QUALITY: 0.55
-};
+// Global variables for blacklists with source tracking
+let blacklisted_domains = new Map(); 
+let whitelisted_domains = new Set();
+let suspicious_tlds = new Map(); 
+let spam_keywords = [];
+let blacklisted_ips = new Map(); // UPDATED: Now Map for source tracking
+let domain_page_ranks = new Map(); 
 
 /**
- * Enhanced Cache Manager for External Data with size optimization
+ * Extract list name from URL for reference
  */
-class CacheManager {
-    constructor() {
-        this.cache = PropertiesService.getScriptProperties();
-        this.cacheExpiryHours = 24 * 14; // 2 weeks
-        this.maxPropertySize = 8000; // Safe limit for PropertiesService (9KB limit)
+function extractListName(url) {
+  try {
+    const cleanUrl = String(url).trim();
+    
+    if (cleanUrl.includes('raw.githubusercontent.com')) {
+      const urlParts = cleanUrl.split('/');
+      
+      const mainIndex = urlParts.indexOf('main');
+      
+      if (mainIndex !== -1 && mainIndex < urlParts.length - 1) {
+        const listName = urlParts[mainIndex + 1];
+        return listName;
+      }
+      
+      if (cleanUrl.includes('/malicious-ip/')) {
+        return 'malicious-ip';
+      }
+      
+      const filename = urlParts[urlParts.length - 1];
+      return filename;
     }
-
-    getCachedData(key) {
-        try {
-            const cacheInfo = this.cache.getProperty(`${key}_info`);
-            if (!cacheInfo) return null;
-            
-            const info = JSON.parse(cacheInfo);
-            const now = new Date().getTime();
-            
-            if (now - info.timestamp > this.cacheExpiryHours * 60 * 60 * 1000) {
-                this.deleteCachedData(key);
-                return null;
-            }
-            
-            // Reconstruct data from chunks
-            const chunks = [];
-            for (let i = 0; i < info.chunks; i++) {
-                const chunk = this.cache.getProperty(`${key}_${i}`);
-                if (!chunk) {
-                    console.log(`Missing chunk ${i} for ${key}, clearing cache`);
-                    this.deleteCachedData(key);
-                    return null;
-                }
-                chunks.push(chunk);
-            }
-            
-            const reconstructed = chunks.join('');
-            return JSON.parse(reconstructed);
-        } catch (error) {
-            console.log(`Cache read error for ${key}: ${error.message}`);
-            this.deleteCachedData(key);
-            return null;
-        }
-    }
-
-    setCachedData(key, data) {
-        try {
-            const serialized = JSON.stringify(data);
-            const chunks = this.chunkString(serialized, this.maxPropertySize);
-            
-            // Clear any existing data first
-            this.deleteCachedData(key);
-            
-            // Store chunks
-            for (let i = 0; i < chunks.length; i++) {
-                this.cache.setProperty(`${key}_${i}`, chunks[i]);
-            }
-            
-            // Store metadata
-            const info = {
-                chunks: chunks.length,
-                timestamp: new Date().getTime(),
-                size: serialized.length
-            };
-            this.cache.setProperty(`${key}_info`, JSON.stringify(info));
-            
-            console.log(`Cached ${key}: ${chunks.length} chunks, ${serialized.length} bytes`);
-        } catch (error) {
-            console.log(`Cache write error for ${key}: ${error.message}`);
-            this.deleteCachedData(key);
-        }
-    }
-
-    deleteCachedData(key) {
-        try {
-            const cacheInfo = this.cache.getProperty(`${key}_info`);
-            if (cacheInfo) {
-                const info = JSON.parse(cacheInfo);
-                for (let i = 0; i < info.chunks; i++) {
-                    this.cache.deleteProperty(`${key}_${i}`);
-                }
-            }
-            this.cache.deleteProperty(`${key}_info`);
-        } catch (error) {
-            console.log(`Cache delete error for ${key}: ${error.message}`);
-        }
-    }
-
-    chunkString(str, chunkSize) {
-        const chunks = [];
-        for (let i = 0; i < str.length; i += chunkSize) {
-            chunks.push(str.slice(i, i + chunkSize));
-        }
-        return chunks;
-    }
-
-    shouldRefreshCache(key) {
-        return this.getCachedData(key) === null;
-    }
-
-    getCacheStats() {
-        try {
-            const allKeys = this.cache.getKeys();
-            const stats = {
-                totalKeys: allKeys.length,
-                cacheKeys: [],
-                totalSize: 0
-            };
-            
-            const infoKeys = allKeys.filter(key => key.endsWith('_info'));
-            for (const infoKey of infoKeys) {
-                try {
-                    const info = JSON.parse(this.cache.getProperty(infoKey));
-                    const baseKey = infoKey.replace('_info', '');
-                    stats.cacheKeys.push({
-                        key: baseKey,
-                        chunks: info.chunks,
-                        size: info.size,
-                        age: Math.round((new Date().getTime() - info.timestamp) / (1000 * 60 * 60)) + 'h'
-                    });
-                    stats.totalSize += info.size;
-                } catch (e) {
-                    // Skip invalid entries
-                }
-            }
-            
-            return stats;
-        } catch (error) {
-            console.log(`Error getting cache stats: ${error.message}`);
-            return { totalKeys: 0, cacheKeys: [], totalSize: 0 };
-        }
-    }
+    
+    return cleanUrl;
+  } catch (error) {
+    console.warn('Error extracting list name from URL:', url, error);
+    return String(url);
+  }
 }
 
 /**
- * Account Exclusion Manager
+ * Create hyperlink for Google Sheets (returns formula as string)
  */
-class AccountExclusionManager {
-    constructor() {
-        this.excludedDomains = [];
-        this.exclusionErrors = [];
-        this.exclusionStats = {
-            attempted: 0,
-            successful: 0,
-            failed: 0,
-            skipped: 0
-        };
-    }
-
-    async addAccountLevelExclusions(placementsToExclude) {
-        if (!ADD_TO_ACCOUNT_EXCLUSIONS) {
-            console.log('Account-level exclusions disabled');
-            return;
-        }
-
-        console.log(`Processing ${placementsToExclude.length} placements for account-level exclusion...`);
-
-        for (const placement of placementsToExclude) {
-            try {
-                this.exclusionStats.attempted++;
-
-                if (placement.placementType !== 'WEBSITE' || !placement.targetUrl) {
-                    this.exclusionStats.skipped++;
-                    continue;
-                }
-
-                const domain = this.extractDomain(placement.targetUrl);
-                if (!domain || domain === 'unknown-domain') {
-                    this.exclusionStats.skipped++;
-                    continue;
-                }
-
-                if (DRY_RUN_MODE) {
-                    console.log(`[DRY RUN] Would exclude: ${domain}`);
-                    this.excludedDomains.push({
-                        domain: domain,
-                        reason: placement.reason,
-                        score: placement.score,
-                        status: 'DRY_RUN'
-                    });
-                    this.exclusionStats.successful++;
-                } else {
-                    const success = await this.addSingleExclusion(domain, placement);
-                    if (success) {
-                        this.excludedDomains.push({
-                            domain: domain,
-                            reason: placement.reason,
-                            score: placement.score,
-                            status: 'EXCLUDED'
-                        });
-                        this.exclusionStats.successful++;
-                        console.log(`✓ Excluded: ${domain}`);
-                    } else {
-                        this.exclusionStats.failed++;
-                    }
-                }
-
-                Utilities.sleep(100); // Rate limiting
-            } catch (error) {
-                this.exclusionStats.failed++;
-                this.exclusionErrors.push({
-                    placement: placement.targetUrl,
-                    error: error.message
-                });
-                console.error(`Error excluding ${placement.targetUrl}: ${error.message}`);
-            }
-        }
-
-        this.logExclusionSummary();
-    }
-
-    async addSingleExclusion(domain, placement) {
-        try {
-            // Add exclusion to all Performance Max campaigns
-            const campaigns = AdsApp.campaigns()
-                .withCondition('campaign.advertising_channel_type = PERFORMANCE_MAX')
-                .withCondition('campaign.status = ENABLED')
-                .get();
-
-            let exclusionAdded = false;
-
-            while (campaigns.hasNext()) {
-                const campaign = campaigns.next();
-                
-                try {
-                    const excludedPlacementOperation = campaign
-                        .targeting()
-                        .excludedPlacements()
-                        .newExcludedPlacementBuilder()
-                        .withUrl(domain)
-                        .build();
-
-                    if (excludedPlacementOperation.isSuccessful()) {
-                        exclusionAdded = true;
-                    }
-                } catch (campaignError) {
-                    console.log(`Failed to add exclusion to campaign ${campaign.getName()}: ${campaignError.message}`);
-                }
-            }
-
-            return exclusionAdded;
-        } catch (error) {
-            console.error(`Exclusion failed for ${domain}: ${error.message}`);
-            return false;
-        }
-    }
-
-    extractDomain(url) {
-        try {
-            if (!url) return null;
-            
-            let cleanUrl = url.trim();
-            if (!cleanUrl.match(/^https?:\/\//i)) {
-                cleanUrl = 'https://' + cleanUrl;
-            }
-            
-            const urlObj = new URL(cleanUrl);
-            return urlObj.hostname.toLowerCase().replace(/^www\./, '');
-        } catch (error) {
-            const match = url.match(/(?:https?:\/\/)?(?:www\.)?([^\/?#]+)/i);
-            return match ? match[1].toLowerCase() : null;
-        }
-    }
-
-    logExclusionSummary() {
-        console.log('\n=== EXCLUSION SUMMARY ===');
-        console.log(`Mode: ${DRY_RUN_MODE ? 'DRY RUN' : 'LIVE'}`);
-        console.log(`Attempted: ${this.exclusionStats.attempted}`);
-        console.log(`Successful: ${this.exclusionStats.successful}`);
-        console.log(`Failed: ${this.exclusionStats.failed}`);
-        console.log(`Skipped: ${this.exclusionStats.skipped}`);
-        
-        if (this.exclusionErrors.length > 0) {
-            console.log('\nErrors:');
-            this.exclusionErrors.forEach(error => {
-                console.log(`- ${error.placement}: ${error.error}`);
-            });
-        }
-    }
-
-    getExclusionResults() {
-        return {
-            excludedDomains: this.excludedDomains,
-            stats: this.exclusionStats,
-            errors: this.exclusionErrors
-        };
-    }
+function createHyperlink(url, text) {
+  return `=HYPERLINK("${url}","${text}")`;
 }
 
 /**
- * Enhanced Blocklist Manager Class with optimized caching
+ * Main execution function
  */
-class BlocklistManager {
-    constructor() {
-        this.blockedDomains = new Set();
-        this.blockedIPs = new Set();
-        this.lastFetched = null;
-        this.fetchSuccess = false;
-        this.cacheManager = new CacheManager();
-        this.blocklistSources = [
-            'https://raw.githubusercontent.com/cbuijs/accomplist/main/easylist/optimized.black.domain.list',
-            'https://raw.githubusercontent.com/cbuijs/accomplist/main/adult-themed/plain.black.domain.level-3.list',
-            'https://raw.githubusercontent.com/cbuijs/accomplist/main/adult-themed/plain.black.domain.level-4.list',
-            'https://raw.githubusercontent.com/cbuijs/accomplist/main/crypto/optimized.black.domain.list',
-            'https://raw.githubusercontent.com/cbuijs/accomplist/main/gambling/optimized.black.domain.list',
-            'https://raw.githubusercontent.com/cbuijs/accomplist/main/games/optimized.black.domain.list',
-            'https://raw.githubusercontent.com/cbuijs/accomplist/main/malicious-dom/optimized.black.idn.domain.list',
-            'https://raw.githubusercontent.com/cbuijs/accomplist/main/streaming/optimized.black.domain.list'
-        ];
-        this.ipBlocklistSource = 'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/malicious-ip/plain.black.ipcidr.list';
-        this.fetchResults = {};
-    }
-
-    async fetchBlocklist() {
-        // Try to load from cache first
-        const cachedDomains = this.cacheManager.getCachedData('blocklist_domains');
-        const cachedIPs = this.cacheManager.getCachedData('blocklist_ips');
-        
-        if (cachedDomains && cachedIPs) {
-            console.log('Loading blocklist from cache...');
-            this.blockedDomains = new Set(cachedDomains);
-            this.blockedIPs = new Set(cachedIPs);
-            this.fetchSuccess = true;
-            this.lastFetched = new Date();
-            console.log(`Cached blocklist loaded: ${this.blockedDomains.size} domains, ${this.blockedIPs.size} IPs`);
-            return { 
-                success: this.fetchSuccess, 
-                totalDomains: this.blockedDomains.size, 
-                totalIPs: this.blockedIPs.size,
-                fetchResults: {} 
-            };
-        }
-
-        console.log('Fetching external blocklists...');
-        const allDomains = new Set();
-        const allIPs = new Set();
-        let successfulFetches = 0;
-        
-        // Fetch domain blocklists
-        for (const url of this.blocklistSources) {
-            try {
-                const response = UrlFetchApp.fetch(url, {
-                    method: 'GET',
-                    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GoogleAdsBot/1.0)' },
-                    muteHttpExceptions: true
-                });
-
-                if (response.getResponseCode() === 200) {
-                    const domains = response.getContentText()
-                        .split('\n')
-                        .map(line => line.trim())
-                        .filter(line => line && !line.startsWith('#') && !line.startsWith('!') && line.includes('.'))
-                        .map(domain => domain.toLowerCase());
-
-                    domains.forEach(domain => allDomains.add(domain));
-                    this.fetchResults[url] = { success: true, count: domains.length, error: null };
-                    successfulFetches++;
-                } else {
-                    throw new Error(`HTTP ${response.getResponseCode()}`);
-                }
-            } catch (error) {
-                console.log(`Failed to fetch ${url}: ${error.message}`);
-                this.fetchResults[url] = { success: false, count: 0, error: error.message };
-            }
-        }
-
-        // Fetch IP blocklist
-        try {
-            const response = UrlFetchApp.fetch(this.ipBlocklistSource, {
-                method: 'GET',
-                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GoogleAdsBot/1.0)' },
-                muteHttpExceptions: true
-            });
-
-            if (response.getResponseCode() === 200) {
-                const ips = response.getContentText()
-                    .split('\n')
-                    .map(line => line.trim())
-                    .filter(line => line && !line.startsWith('#') && (line.includes('.') || line.includes(':')));
-
-                ips.forEach(ip => allIPs.add(ip));
-                this.fetchResults[this.ipBlocklistSource] = { success: true, count: ips.length, error: null };
-                successfulFetches++;
-            } else {
-                throw new Error(`HTTP ${response.getResponseCode()}`);
-            }
-        } catch (error) {
-            console.log(`Failed to fetch IP blocklist: ${error.message}`);
-            this.fetchResults[this.ipBlocklistSource] = { success: false, count: 0, error: error.message };
-        }
-
-        this.blockedDomains = allDomains;
-        this.blockedIPs = allIPs;
-        this.lastFetched = new Date();
-        this.fetchSuccess = successfulFetches > 0;
-
-        if (successfulFetches === 0) {
-            this.initializeFallbackBlocklist();
-        } else {
-            // Cache the results using chunked storage
-            console.log('Caching blocklist data...');
-            this.cacheManager.setCachedData('blocklist_domains', Array.from(this.blockedDomains));
-            this.cacheManager.setCachedData('blocklist_ips', Array.from(this.blockedIPs));
-        }
-        
-        console.log(`Blocklist loaded: ${this.blockedDomains.size} domains, ${this.blockedIPs.size} IPs from ${successfulFetches}/${this.blocklistSources.length + 1} sources`);
-        return { 
-            success: this.fetchSuccess, 
-            totalDomains: this.blockedDomains.size, 
-            totalIPs: this.blockedIPs.size,
-            fetchResults: this.fetchResults 
-        };
-    }
-
-    initializeFallbackBlocklist() {
-        const fallbackDomains = [
-            'doubleclick.net', 'googleadservices.com', 'googlesyndication.com',
-            'facebook.com', 'instagram.com', 'twitter.com', 'tiktok.com', 'youtube.com',
-            'pornhub.com', 'xvideos.com', 'bet365.com', 'pokerstars.com', 'coinbase.com'
-        ];
-        this.blockedDomains = new Set(fallbackDomains);
-        this.blockedIPs = new Set(); // No fallback IPs
-        console.log(`Using fallback blocklist: ${this.blockedDomains.size} domains`);
-    }
-
-    isDomainBlocked(domain) {
-        if (!domain) return false;
-        const cleanDomain = domain.toLowerCase().replace(/^www\./, '');
-        
-        if (this.blockedDomains.has(cleanDomain)) return true;
-        
-        for (const blockedDomain of this.blockedDomains) {
-            if (cleanDomain.endsWith('.' + blockedDomain) || cleanDomain === blockedDomain) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    isIPBlocked(ip) {
-        if (!ip) return false;
-        
-        // Direct IP match
-        if (this.blockedIPs.has(ip) || this.blockedIPs.has(`${ip}/32`)) return true;
-        
-        // Check CIDR ranges (simplified check for common cases)
-        for (const blockedIP of this.blockedIPs) {
-            if (blockedIP.includes('/')) {
-                const [network, prefix] = blockedIP.split('/');
-                if (ip.startsWith(network.split('.').slice(0, Math.floor(parseInt(prefix) / 8)).join('.'))) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    getBlocklistStats() {
-        return {
-            totalDomains: this.blockedDomains.size,
-            totalIPs: this.blockedIPs.size,
-            lastFetched: this.lastFetched,
-            fetchSuccess: this.fetchSuccess,
-            fetchResults: this.fetchResults
-        };
-    }
-
-    shouldRefreshBlocklist() {
-        return this.cacheManager.shouldRefreshCache('blocklist_domains');
-    }
-}
-
-class KeywordConfiguration {
-    constructor() {
-        this.initializeB2BIndustrialTerms();
-        this.initializeWhitelistedDomains();
-        this.initializeProfessionalDomains();
-        this.SUSPICIOUS_TLDS = null; // Will be loaded async
-        this.SPAM_KEYWORDS = null; // Will be loaded from external source
-        this.cacheManager = new CacheManager();
-        this.spamKeywordsSource = 'https://raw.githubusercontent.com/J-Gute/pmax-words-to-exlcude/main/spam-and-irrelevant-terms';
-    }
-
-    async initializeSpamKeywords() {
-        // Try to load from cache first
-        const cachedKeywords = this.cacheManager.getCachedData('spam_keywords');
-        if (cachedKeywords) {
-            console.log('Loading spam keywords from cache...');
-            this.SPAM_KEYWORDS = cachedKeywords;
-            return;
-        }
-
-        try {
-            console.log('Fetching spam keywords from external source...');
-            const response = UrlFetchApp.fetch(this.spamKeywordsSource, {
-                method: 'GET',
-                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GoogleAdsBot/1.0)' },
-                muteHttpExceptions: true
-            });
-
-            if (response.getResponseCode() === 200) {
-                this.SPAM_KEYWORDS = response.getContentText()
-                    .split('\n')
-                    .map(line => line.trim())
-                    .filter(line => line && !line.startsWith('#') && !line.startsWith('//'))
-                    .map(keyword => keyword.toLowerCase());
-                
-                // Cache the results
-                this.cacheManager.setCachedData('spam_keywords', this.SPAM_KEYWORDS);
-                console.log(`Loaded ${this.SPAM_KEYWORDS.length} spam keywords from external source`);
-            } else {
-                throw new Error(`HTTP ${response.getResponseCode()}`);
-            }
-        } catch (error) {
-            console.log(`Failed to fetch spam keywords: ${error.message}, using fallback`);
-            this.initializeFallbackSpamKeywords();
-        }
-    }
-
-    initializeFallbackSpamKeywords() {
-        // Minimal fallback list in case external source fails
-        this.SPAM_KEYWORDS = [
-            'free', 'crack', 'keygen', 'serial', 'torrent', 'pirate', 'warez', 'nulled', 'leaked',
-            'game', 'gaming', 'entertainment', 'movie', 'music', 'streaming', 'download', 'mp3', 'mp4',
-            'personal loan', 'credit card', 'mortgage', 'dating', 'singles', 'chat', 'facebook',
-            'virus removal', 'pc cleaner', 'driver update', 'registry cleaner', 'antivirus free',
-            'shocking', 'unbelievable', 'secret', 'trick', 'hack', 'amazing', 'incredible', 'viral',
-            'adult', 'xxx', 'porn', 'sex', 'casino', 'poker', 'lottery', 'gambling', 'betting',
-            'win money', 'earn cash', 'make money fast', 'get rich', 'investment opportunity'
-        ];
-        console.log(`Using fallback spam keywords: ${this.SPAM_KEYWORDS.length} terms`);
-    }
-
-    initializeB2BIndustrialTerms() {
-        this.ENTERPRISE_RELEVANT_KEYWORDS = [
-            'cnc machining', 'additive manufacturing', '3d printing', 'injection molding',
-            'lean manufacturing', 'six sigma', 'kaizen', 'mes', 'scada', 'hmi', 'dcs',
-            'iiot', 'industry 4.0', 'smart manufacturing', 'plm', 'cad', 'cam', 'cae',
-            'fea', 'cfd', 'pdm', 'ecm', 'qms', 'iso 9001', 'spc', 'fmea',
-            'erp', 'mrp', 'scm', 'crm', 'bi', 'etl', 'api integration', 'soa',
-            'plc', 'servo drive', 'vfd', 'industrial ethernet', 'fieldbus', 'sis',
-            'predictive maintenance', 'condition monitoring', 'machine learning',
-            'artificial intelligence', 'digital twin', 'simulation', 'process optimization'
-        ];
-    }
-
-    initializeWhitelistedDomains() {
-        this.WHITELISTED_DOMAINS = [
-            // Major industrial/tech companies
-            'siemens.com', 'ge.com', 'honeywell.com', 'schneider-electric.com', 'rockwellautomation.com',
-            'emerson.com', 'abb.com', 'mitsubishi.com', 'omron.com', 'fanuc.com',
-            'solidworks.com', 'autodesk.com', 'ptc.com', 'dassaultsystemes.com', 'ansys.com',
-            'sap.com', 'oracle.com', 'microsoft.com', 'salesforce.com', 'ibm.com',
-            
-            // Engineering publications
-            'engineering.com', 'machinedesign.com', 'manufacturing.net', 'industryweek.com',
-            'automationworld.com', 'controleng.com', 'qualitymag.com', 'assemblymag.com',
-            
-            // News and business
-            'reuters.com', 'bloomberg.com', 'wsj.com', 'ft.com', 'economist.com',
-            'forbes.com', 'harvard.edu', 'mit.edu', 'stanford.edu', 'ieee.org',
-            
-            // Government and standards
-            'nist.gov', 'nasa.gov', 'energy.gov', 'iso.org', 'iec.ch', 'ansi.org'
-        ];
-    }
-
-    initializeProfessionalDomains() {
-        this.PROFESSIONAL_DOMAINS = [
-            'siemens', 'ge', 'honeywell', 'schneider-electric', 'rockwellautomation',
-            'emerson', 'abb', 'solidworks', 'autodesk', 'ptc', 'sap', 'oracle',
-            'microsoft', 'salesforce', 'ibm', 'cisco', 'vmware'
-        ];
-    }
-
-    async initializeSuspiciousTLDs() {
-        // Try to load from cache first
-        const cachedTLDs = this.cacheManager.getCachedData('suspicious_tlds');
-        if (cachedTLDs) {
-            console.log('Loading suspicious TLDs from cache...');
-            this.SUSPICIOUS_TLDS = cachedTLDs;
-            return;
-        }
-
-        try {
-            const response = UrlFetchApp.fetch('https://raw.githubusercontent.com/cbuijs/accomplist/main/abuse-tlds/plain.black.domain.level-1.list.routedns', {
-                method: 'GET',
-                muteHttpExceptions: true
-            });
-
-            if (response.getResponseCode() === 200) {
-                this.SUSPICIOUS_TLDS = response.getContentText()
-                    .split('\n')
-                    .map(line => line.trim())
-                    .filter(line => line && !line.startsWith('#'))
-                    .map(tld => tld.startsWith('.') ? tld : '.' + tld);
-                
-                // Cache the results
-                this.cacheManager.setCachedData('suspicious_tlds', this.SUSPICIOUS_TLDS);
-                console.log(`Loaded ${this.SUSPICIOUS_TLDS.length} suspicious TLDs from external source`);
-            } else {
-                throw new Error(`HTTP ${response.getResponseCode()}`);
-            }
-        } catch (error) {
-            console.log(`Failed to fetch suspicious TLDs: ${error.message}, using fallback`);
-            this.SUSPICIOUS_TLDS = [
-                '.tk', '.ml', '.ga', '.cf', '.top', '.click', '.download', '.stream',
-                '.racing', '.cricket', '.science', '.work', '.party', '.gq', '.link',
-                '.date', '.loan', '.win', '.bid', '.trade', '.webcam', '.men'
-            ];
-        }
-    }
-
-    getSpamKeywords() {
-        return this.SPAM_KEYWORDS || [];
-    }
-}
-
-// [Rest of the classes remain the same: TFIDFMetaAnalyzer, EnterpriseURLQualityAssessor]
-
-class TFIDFMetaAnalyzer {
-    constructor() {
-        this.stopWords = new Set([
-            'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'has', 'he',
-            'in', 'is', 'it', 'its', 'of', 'on', 'that', 'the', 'to', 'was', 'will',
-            'with', 'we', 'you', 'your', 'our', 'this', 'these', 'they', 'them', 'their'
-        ]);
-        
-        // Dynamic spam patterns that will be built from external keywords
-        this.spamPatterns = [];
-        this.initializeBasePatterns();
-        
-        // Whitelist of legitimate terms that might contain spam substrings
-        this.legitimateTerms = new Set([
-            'analytics', 'analysis', 'analyst', 'analyze', 'analytical',
-            'technical', 'mechanical', 'electrical', 'chemical',
-            'physical', 'medical', 'practical', 'statistical', 'mathematical',
-            'technological','economical', 'political',
-            'development', 'government', 'improvement',
-            'advertisement', 'establishment', 'assessment', 'investment',
-            'professional', 'educational', 'international', 'operational',
-            'organizational', 'informational', 'functional'
-        ]);
-    }
-
-    initializeBasePatterns() {
-        // Base patterns for common obfuscation techniques with improved word boundaries
-        this.spamPatterns = [
-            // Critical patterns with strict word boundaries
-            /\b(?:free|fr33|f\s*r\s*e\s*e|freee)\b/gi,
-            /\b(?:win|w1n|winn|winner|winning)\s*(?:money|cash|big|prizes?)\b/gi,
-            /\b(?:casino|poker|lottery|gambling|bet|betting)\b/gi,
-            /\b(?:adult|xxx|porn|sex|dating|singles)\b/gi,
-            /\b(?:earn|make)\s*(?:money|cash|\$)\s*(?:fast|quick|easy|now)\b/gi,
-            /\b(?:miracle|amazing|incredible|shocking|unbelievable)\b/gi,
-            /\b(?:limited\s*time|act\s*now|hurry|urgent|expires?)\b/gi,
-            /\b(?:guarantee|guaranteed|risk\s*free|no\s*risk)\b/gi,
-            
-            // Obfuscation patterns with word boundaries
-            /\b(?:fr[3e]{2,}|f[r3]{2,}e|fre{3,})\b/gi,
-            /\b(?:w[1i]{2,}n|wi{2,}n|w1nn?)\b/gi,
-            /\b(?:m[0o]{2,}ney|mon[3e]{2,}y|m0n3y)\b/gi,
-            /\b(?:c[4a]{2,}sh|ca[5s]{2,}h|c4sh)\b/gi
-        ];
-    }
-
-    buildDynamicSpamPatterns() {
-        // Build additional patterns from external spam keywords with improved matching
-        const spamKeywords = globalThis.keywordConfig?.getSpamKeywords() || [];
-        
-        spamKeywords.forEach(keyword => {
-            if (keyword.length > 2) {
-                // Skip if keyword is a substring of a legitimate term
-                const isLegitimateSubstring = Array.from(this.legitimateTerms).some(legitTerm => 
-                    legitTerm.toLowerCase().includes(keyword.toLowerCase()) && 
-                    legitTerm.toLowerCase() !== keyword.toLowerCase()
-                );
-                
-                if (!isLegitimateSubstring) {
-                    // Create regex pattern with strict word boundaries
-                    const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    
-                    // For short keywords (3-4 chars), use stricter matching
-                    if (keyword.length <= 4) {
-                        // Only match if surrounded by non-letter characters or at word boundaries
-                        const pattern = new RegExp(`(?:^|\\W)(${escapedKeyword})(?=\\W|$)`, 'gi');
-                        this.spamPatterns.push(pattern);
-                    } else {
-                        // For longer keywords, use standard word boundary matching
-                        const pattern = new RegExp(`\\b${escapedKeyword}\\b`, 'gi');
-                        this.spamPatterns.push(pattern);
-                    }
-                }
-            }
-        });
-        
-        console.log(`Built ${this.spamPatterns.length} spam detection patterns`);
-    }
-
-    extractAndAnalyzeMetaContent(html) {
-        // Ensure dynamic patterns are built
-        if (globalThis.keywordConfig?.getSpamKeywords()?.length > 0 && this.spamPatterns.length < 50) {
-            this.buildDynamicSpamPatterns();
-        }
-
-        const metaContent = this.extractMetaContent(html);
-        const allText = this.combineMetaText(metaContent);
-        const tfidfKeywords = this.performTFIDFAnalysis(allText);
-        const spamAnalysis = this.performSpamAnalysis(allText);
-        
-        return {
-            metaContent,
-            tfidfKeywords,
-            spamAnalysis,
-            combinedKeywords: this.generateCombinedKeywords(tfidfKeywords, spamAnalysis),
-            spamScore: spamAnalysis.totalSpamScore,
-            professionalScore: this.calculateProfessionalScore(allText),
-            detectedSpamKeywords: spamAnalysis.detectedSpamKeywords || [],
-            allKeywords: tfidfKeywords.map(k => k.term) // All keywords for reasons output
-        };
-    }
-
-    extractMetaContent(html) {
-        const metaContent = { title: '', description: '', keywords: '' };
-        
-        const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-        if (titleMatch) metaContent.title = titleMatch[1].trim();
-
-        const metaRegex = /<meta[^>]*(?:name|property)=["']([^"']*)["'][^>]*content=["']([^"']*)["'][^>]*>/gi;
-        let match;
-        while ((match = metaRegex.exec(html)) !== null) {
-            const name = match[1].toLowerCase();
-            const content = match[2].trim();
-            if (name === 'description') metaContent.description = content;
-            if (name === 'keywords') metaContent.keywords = content;
-        }
-        
-        return metaContent;
-    }
-
-    combineMetaText(metaContent) {
-        return [metaContent.title, metaContent.description, metaContent.keywords]
-            .filter(text => text && text.length > 0)
-            .join(' ');
-    }
-
-    performTFIDFAnalysis(text) {
-        const words = this.tokenizeText(text);
-        const termFreq = {};
-        words.forEach(word => termFreq[word] = (termFreq[word] || 0) + 1);
-
-        return Object.entries(termFreq)
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 10) // Get more keywords for reasons output
-            .map(([term, frequency]) => ({ term, frequency }));
-    }
-
-    tokenizeText(text) {
-        return text.toLowerCase()
-            .replace(/[^a-z0-9\s]/g, ' ')
-            .split(/\s+/)
-            .filter(word => word.length > 2 && !this.stopWords.has(word) && !/^\d+$/.test(word));
-    }
-
-    performSpamAnalysis(text) {
-        const spamResults = { 
-            criticalSpam: [], 
-            totalSpamScore: 0, 
-            spamFlags: [],
-            detectedSpamKeywords: []
-        };
-        
-        this.spamPatterns.forEach((pattern, index) => {
-            const matches = text.match(pattern) || [];
-            if (matches.length > 0) {
-                // Filter out matches that are part of legitimate terms
-                const validMatches = matches.filter(match => {
-                    const cleanMatch = match.replace(/^\W+|\W+$/g, '').toLowerCase(); // Remove leading/trailing non-word chars
-                    
-                    // Check if this match is part of a legitimate term
-                    const isPartOfLegitimate = Array.from(this.legitimateTerms).some(legitTerm => {
-                        const lowerLegit = legitTerm.toLowerCase();
-                        // Check if the legitimate term contains this match and appears in the text
-                        return lowerLegit.includes(cleanMatch) && 
-                               lowerLegit !== cleanMatch && 
-                               text.toLowerCase().includes(lowerLegit);
-                    });
-                    
-                    return !isPartOfLegitimate;
-                });
-                
-                if (validMatches.length > 0) {
-                    const score = validMatches.length * (index < 8 ? -2.0 : -1.6); // Critical vs obfuscation
-                    spamResults.criticalSpam.push({ 
-                        pattern: pattern.toString(), 
-                        matches: validMatches.length, 
-                        score,
-                        matchedTerms: validMatches
-                    });
-                    spamResults.totalSpamScore += score;
-                    spamResults.spamFlags.push('SPAM_DETECTED');
-                    
-                    // Add detected spam keywords (cleaned)
-                    validMatches.forEach(match => {
-                        const cleanMatch = match.replace(/^\W+|\W+$/g, '').toLowerCase();
-                        if (!spamResults.detectedSpamKeywords.includes(cleanMatch)) {
-                            spamResults.detectedSpamKeywords.push(cleanMatch);
-                        }
-                    });
-                }
-            }
-        });
-        
-        return spamResults;
-    }
-
-    calculateProfessionalScore(text) {
-        let score = 0;
-        const lowerText = text.toLowerCase();
-        globalThis.keywordConfig?.ENTERPRISE_RELEVANT_KEYWORDS?.forEach(term => {
-            if (lowerText.includes(term)) score += 0.5;
-        });
-        return Math.min(score, 3.0);
-    }
-
-    generateCombinedKeywords(tfidfKeywords, spamAnalysis) {
-        const keywords = [];
-        
-        if (spamAnalysis.criticalSpam.length > 0) {
-            const totalMatches = spamAnalysis.criticalSpam.reduce((sum, item) => sum + item.matches, 0);
-            const totalScore = spamAnalysis.criticalSpam.reduce((sum, item) => sum + item.score, 0);
-            const spamKeywords = spamAnalysis.detectedSpamKeywords.slice(0, 3).join(', ');
-            keywords.push(`SPAM: ${totalMatches} matches (${totalScore.toFixed(2)}) - Keywords: ${spamKeywords}`);
-        }
-        
-        if (spamAnalysis.criticalSpam.length === 0 && tfidfKeywords.length > 0) {
-            const topKeywords = tfidfKeywords
-                .slice(0, 5)
-                .map(item => `${item.term}(${item.frequency})`)
-                .join(', ');
-            keywords.push(`KEYWORDS: ${topKeywords}`);
-        }
-        
-        return keywords.length > 0 ? keywords.join(' | ') : 'no significant keywords found';
-    }
-}
-
-class EnterpriseURLQualityAssessor {
-    constructor() {
-        this.SCORING_WEIGHTS = {
-            DOMAIN_AUTHORITY: 0.15,
-            CONTENT_RELEVANCE: 0.25,
-            TECHNICAL_QUALITY: 0.20,
-            SPAM_INDICATORS: 0.40
-        };
-        this.CONTENT_FETCH_TIMEOUT = URL_TIMEOUT_SECONDS * 1000;
-        this.MAX_CONTENT_SIZE = 700000;
-        this.fetchTimes = [];
-        this.tfidfAnalyzer = new TFIDFMetaAnalyzer();
-        
-        // Consolidated keywords for efficiency
-        this.INDUSTRIAL_KEYWORDS = [
-            'manufacturing', 'factory', 'industrial', 'machinery', 'equipment',
-            'automation', 'assembly', 'production', 'engineering', 'cad', 'plm'
-        ];
-        this.B2B_INDICATORS = ['enterprise', 'industrial', 'solution', 'software', 'platform', 'system'];
-        this.HEADING_WEIGHTS = { 'h1': 3.0, 'h2': 2.0, 'h3': 1.5, 'h4': 1.0, 'h5': 0.8, 'h6': 0.6 };
-    }
-
-    async performAdvancedDNSLookup(domain) {
-        const dnsInfo = {
-            success: false, ipAddresses: [], mxRecords: [], txtRecords: [],
-            hostingProvider: null, isCloudflare: false, isAWS: false, isEnterprise: false,
-            lookupTime: 0, error: null, isBlacklistedIP: false, blacklistedIPs: []
-        };
-
-        const startTime = Date.now();
-
-        try {
-            const response = UrlFetchApp.fetch(`https://1.1.1.1/dns-query?name=${domain}&type=A`, {
-                method: 'GET',
-                headers: { 'Accept': 'application/dns-json' },
-                muteHttpExceptions: true
-            });
-
-            dnsInfo.lookupTime = Date.now() - startTime;
-
-            if (response.getResponseCode() === 200) {
-                const dnsData = JSON.parse(response.getContentText());
-                
-                if (dnsData.Status === 0 && dnsData.Answer) {
-                    dnsInfo.success = true;
-                    dnsInfo.ipAddresses = dnsData.Answer.filter(r => r.type === 1).map(r => r.data);
-
-                    // Check for blacklisted IPs
-                    dnsInfo.ipAddresses.forEach(ip => {
-                        if (globalThis.blocklistManager?.isIPBlocked(ip)) {
-                            dnsInfo.isBlacklistedIP = true;
-                            dnsInfo.blacklistedIPs.push(ip);
-                        }
-                    });
-
-                    // Analyze hosting provider
-                    dnsInfo.ipAddresses.forEach(ip => {
-                        const hostingInfo = this.analyzeIPAddress(ip);
-                        if (hostingInfo.provider) {
-                            Object.assign(dnsInfo, hostingInfo);
-                        }
-                    });
-
-                    // Additional DNS queries
-                    await this.performAdditionalDNSQueries(domain, dnsInfo);
-                } else {
-                    dnsInfo.error = `DNS query failed: ${dnsData.Status}`;
-                }
-            } else {
-                dnsInfo.error = `HTTP ${response.getResponseCode()}`;
-            }
-        } catch (error) {
-            dnsInfo.lookupTime = Date.now() - startTime;
-            dnsInfo.error = error.message;
-        }
-
-        return dnsInfo;
-    }
-
-    analyzeIPAddress(ip) {
-        const cloudflareRanges = ['104.16.', '104.17.', '104.18.', '104.19.', '104.20.', '104.21.',
-                                 '104.22.', '104.23.', '104.24.', '104.25.', '104.26.', '104.27.',
-                                 '104.28.', '104.29.', '104.30.', '104.31.', '172.64.', '172.65.',
-                                 '172.66.', '172.67.', '172.68.', '172.69.', '172.70.', '172.71.'];
-        
-        const awsRanges = ['52.', '54.', '3.', '13.', '18.', '34.', '35.'];
-        const enterpriseRanges = ['20.', '40.', '52.', '104.', '35.', '34.'];
-
-        if (cloudflareRanges.some(range => ip.startsWith(range))) {
-            return { provider: 'cloudflare', isCloudflare: true, isAWS: false, isEnterprise: true };
-        }
-        
-        if (awsRanges.some(range => ip.startsWith(range))) {
-            return { provider: 'aws', isCloudflare: false, isAWS: true, isEnterprise: true };
-        }
-        
-        return { 
-            provider: null, 
-            isCloudflare: false, 
-            isAWS: false, 
-            isEnterprise: enterpriseRanges.some(range => ip.startsWith(range))
-        };
-    }
-
-    async performAdditionalDNSQueries(domain, dnsInfo) {
-        try {
-            const [mxResponse, txtResponse] = await Promise.all([
-                this.queryDNSRecord(domain, 'MX'),
-                this.queryDNSRecord(domain, 'TXT')
-            ]);
-
-            if (mxResponse.success) dnsInfo.mxRecords = mxResponse.records;
-            if (txtResponse.success) {
-                dnsInfo.txtRecords = txtResponse.records;
-                // Check for AWS in SPF records
-                if (txtResponse.records.some(r => r.data.includes('v=spf1') && r.data.includes('amazonaws.com'))) {
-                    dnsInfo.isAWS = true;
-                    dnsInfo.hostingProvider = 'aws';
-                }
-            }
-        } catch (error) {
-            console.log(`Additional DNS queries failed: ${error.message}`);
-        }
-    }
-
-    async queryDNSRecord(domain, recordType) {
-        try {
-            const response = UrlFetchApp.fetch(`https://1.1.1.1/dns-query?name=${domain}&type=${recordType}`, {
-                method: 'GET',
-                headers: { 'Accept': 'application/dns-json' },
-                muteHttpExceptions: true
-            });
-
-            if (response.getResponseCode() === 200) {
-                const dnsData = JSON.parse(response.getContentText());
-                if (dnsData.Status === 0 && dnsData.Answer) {
-                    return {
-                        success: true,
-                        records: dnsData.Answer.map(record => ({
-                            type: record.type, data: record.data, ttl: record.TTL
-                        }))
-                    };
-                }
-            }
-            return { success: false, records: [] };
-        } catch (error) {
-            return { success: false, error: error.message, records: [] };
-        }
-    }
-
-    validateAndNormalizeURL(url) {
-        if (!url || typeof url !== 'string') throw new Error('URL is empty or not a string');
-        
-        url = url.trim();
-        if (!url) throw new Error('URL is empty');
-        if (!url.match(/^https?:\/\//i)) url = 'https://' + url;
-        if (!url.match(/^https?:\/\/[^\s]+$/i)) throw new Error('URL format appears invalid');
-        
-        return url;
-    }
-
-    extractDomainSafely(url) {
-        try {
-            return new URL(this.validateAndNormalizeURL(url)).hostname.toLowerCase();
-        } catch (error) {
-            const match = url.match(/(?:https?:\/\/)?(?:www\.)?([^\/?#]+)/i);
-            return match ? match[1].toLowerCase() : 'unknown-domain';
-        }
-    }
-
-    assessURLSpamIndicators(fullUrl, domain) {
-        // Quick whitelist check
-        if (globalThis.keywordConfig?.WHITELISTED_DOMAINS?.some(d => domain.includes(d))) return { score: 1.0, detectedSpamKeywords: [] };
-
-        let score = 1.0;
-        let spamMatches = 0;
-        const detectedSpamKeywords = [];
-
-        // Critical patterns with heavy penalties
-        const criticalPatterns = [
-            /\b(free|casino|win|adult|xxx|porn|dating|lottery|gambling)\b/gi,
-            /\d{4,}/g,
-            /[\-_]{3,}/g,
-            /\b(download|crack|keygen|serial|torrent|stream)\b/gi
-        ];
-
-        criticalPatterns.forEach(pattern => {
-            const matches = fullUrl.match(pattern) || [];
-            if (matches.length > 0) {
-                spamMatches += matches.length;
-                score -= matches.length * 0.4;
-                matches.forEach(match => {
-                    if (!detectedSpamKeywords.includes(match.toLowerCase())) {
-                        detectedSpamKeywords.push(match.toLowerCase());
-                    }
-                });
-            }
-        });
-
-        // Check against external spam keywords
-        const spamKeywords = globalThis.keywordConfig?.getSpamKeywords() || [];
-        spamKeywords.forEach(keyword => {
-            if (fullUrl.includes(keyword.toLowerCase())) {
-                spamMatches++;
-                score -= 0.2;
-                if (!detectedSpamKeywords.includes(keyword)) {
-                    detectedSpamKeywords.push(keyword);
-                }
-            }
-        });
-
-        // Exponential penalties for multiple spam indicators
-        if (spamMatches >= 3) score -= 0.4;
-        if (spamMatches >= 5) score -= 0.6;
-        if (/xn--/.test(domain)) score -= 0.2;
-
-        return { 
-            score: Math.max(0, Math.min(1, score)),
-            detectedSpamKeywords: detectedSpamKeywords
-        };
-    }
-
-    async fetchAndAnalyzeContentWithTimeout(url) {
-        const startTime = Date.now();
-        const contentAnalysis = {
-            fetchSuccess: false, metaTags: {}, headings: [], images: [],
-            industrialIndicators: 0, spamIndicators: 0, b2bIndicators: 0, rawHtml: '',
-            detectedSpamKeywords: []
-        };
-
-        try {
-            const response = UrlFetchApp.fetch(url, {
-                method: 'GET',
-                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GoogleAdsBot/1.0)' },
-                muteHttpExceptions: true
-            });
-
-            const fetchDuration = Date.now() - startTime;
-            this.fetchTimes.push({ url, duration: fetchDuration, timestamp: new Date() });
-
-            if (response.getResponseCode() !== 200) {
-                throw new Error(`HTTP ${response.getResponseCode()}`);
-            }
-
-            const html = response.getContentText().substring(0, this.MAX_CONTENT_SIZE);
-            contentAnalysis.fetchSuccess = true;
-            contentAnalysis.rawHtml = html;
-
-            // Parse content efficiently
-            this.parseContent(html, contentAnalysis);
-            this.calculateContentScores(contentAnalysis);
-
-        } catch (error) {
-            throw error;
-        }
-
-        return contentAnalysis;
-    }
-
-    parseContent(html, contentAnalysis) {
-        // Parse meta tags
-        const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-        if (titleMatch) contentAnalysis.metaTags.title = titleMatch[1];
-
-        const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i);
-        if (descMatch) contentAnalysis.metaTags.description = descMatch[1];
-
-        // Parse headings efficiently
-        for (let level = 1; level <= 6; level++) {
-            const headingRegex = new RegExp(`<h${level}[^>]*>([^<]*)</h${level}>`, 'gi');
-            let match;
-            while ((match = headingRegex.exec(html)) !== null) {
-                contentAnalysis.headings.push({
-                    level, text: match[1].toLowerCase().trim(), weight: this.HEADING_WEIGHTS[`h${level}`]
-                });
-            }
-        }
-
-        // Parse images
-        const imgRegex = /<img[^>]*alt=["']([^"']*)["'][^>]*>/gi;
-        let match;
-        while ((match = imgRegex.exec(html)) !== null) {
-            const altText = match[1].toLowerCase().trim();
-            if (altText && altText.length > 2) {
-                contentAnalysis.images.push({
-                    altText,
-                    isIndustrial: this.INDUSTRIAL_KEYWORDS.some(keyword => altText.includes(keyword))
-                });
-            }
-        }
-    }
-
-    calculateContentScores(contentAnalysis) {
-        let industrialScore = 0, spamScore = 0, b2bScore = 0;
-        const allMetaText = Object.values(contentAnalysis.metaTags).join(' ').toLowerCase();
-        
-        // Score industrial relevance
-        globalThis.keywordConfig?.ENTERPRISE_RELEVANT_KEYWORDS?.forEach(keyword => {
-            if (allMetaText.includes(keyword)) industrialScore += 0.1;
-        });
-
-        // Score B2B indicators
-        this.B2B_INDICATORS.forEach(indicator => {
-            if (allMetaText.includes(indicator)) b2bScore += 0.1;
-        });
-
-        // Score spam content using external keywords
-        const spamKeywords = globalThis.keywordConfig?.getSpamKeywords() || [];
-        spamKeywords.forEach(keyword => {
-            if (allMetaText.includes(keyword)) {
-                spamScore += 0.15;
-                if (!contentAnalysis.detectedSpamKeywords.includes(keyword)) {
-                    contentAnalysis.detectedSpamKeywords.push(keyword);
-                }
-            }
-        });
-
-        // Score headings
-        contentAnalysis.headings.forEach(heading => {
-            globalThis.keywordConfig?.ENTERPRISE_RELEVANT_KEYWORDS?.forEach(keyword => {
-                if (heading.text.includes(keyword)) {
-                    industrialScore += 0.05 * heading.weight;
-                }
-            });
-        });
-
-        // Score industrial images
-        if (contentAnalysis.images.length > 0) {
-            const industrialImages = contentAnalysis.images.filter(img => img.isIndustrial).length;
-            industrialScore += (industrialImages / contentAnalysis.images.length) * 0.2;
-        }
-
-        contentAnalysis.industrialIndicators = Math.min(1.0, industrialScore);
-        contentAnalysis.spamIndicators = Math.min(1.0, spamScore);
-        contentAnalysis.b2bIndicators = Math.min(1.0, b2bScore);
-    }
-
-    assessDomainQuality(domain) {
-        let score = 0.5;
-
-        // Whitelist boost
-        if (globalThis.keywordConfig?.WHITELISTED_DOMAINS?.some(d => domain.includes(d))) score += 0.5;
-        if (globalThis.keywordConfig?.PROFESSIONAL_DOMAINS?.some(d => domain.includes(d))) score += 0.4;
-
-        // TLD analysis
-        const tld = domain.substring(domain.lastIndexOf('.'));
-        if (globalThis.keywordConfig?.SUSPICIOUS_TLDS?.includes(tld)) {
-            score -= 0.3;
-        } else if (['.com', '.org', '.edu', '.gov', '.net'].includes(tld)) {
-            score += 0.2;
-        }
-
-        // Domain structure penalties
-        const sld = domain.split('.')[domain.split('.').length - 2] || '';
-        if (sld.length < 3 || sld.length > 25) score -= 0.2;
-        if (sld.includes('-')) score -= 0.1;
-        if (/\d{3,}/.test(sld)) score -= 0.2;
-
-        return Math.max(0, Math.min(1, score));
-    }
-
-    assessContentRelevance(fullUrl, domain, path) {
-        let score = 0;
-
-        // Whitelist boost
-        if (globalThis.keywordConfig?.WHITELISTED_DOMAINS?.some(d => domain.includes(d))) score += 0.3;
-
-        // Keyword relevance
-        let relevantMatches = 0;
-        globalThis.keywordConfig?.ENTERPRISE_RELEVANT_KEYWORDS?.forEach(keyword => {
-            if (fullUrl.includes(keyword.toLowerCase())) {
-                relevantMatches++;
-                score += 0.1;
-            }
-        });
-
-        if (relevantMatches >= 3) score += 0.2;
-
-        // Path analysis
-        const industryPaths = ['/manufacturing', '/engineering', '/plm', '/cad', '/software', '/solutions', '/products', '/enterprise', '/industrial'];
-        if (industryPaths.some(p => path.includes(p))) score += 0.2;
-
-        // B2B indicators
-        if (['enterprise', 'business', 'professional', 'industrial', 'commercial'].some(indicator => fullUrl.includes(indicator))) {
-            score += 0.1;
-        }
-
-        return Math.max(0, Math.min(1, score));
-    }
-
-    assessTechnicalQuality(domain, path, params, dnsInfo) {
-        let score = 0.7;
-
-        // Whitelist boost
-        if (globalThis.keywordConfig?.WHITELISTED_DOMAINS?.some(d => domain.includes(d))) score += 0.2;
-
-        // URL structure penalties
-        if (path.length > 100) score -= 0.1;
-        if ((params.match(/&/g) || []).length > 10) score -= 0.2;
-        if (['.exe', '.zip', '.rar', '.dmg', '.apk'].some(ext => path.includes(ext))) score -= 0.4;
-        if (['bit.ly', 'tinyurl', 't.co', 'goo.gl', 'ow.ly'].some(short => domain.includes(short))) score -= 0.3;
-
-        // DNS-based scoring
-        if (dnsInfo?.success) {
-            if (dnsInfo.isBlacklistedIP) score -= 0.5; // Heavy penalty for blacklisted IPs
-            if (dnsInfo.ipAddresses.length > 1) score += 0.1;
-            if (dnsInfo.isEnterprise) score += 0.15;
-            if (dnsInfo.lookupTime < 500) score += 0.1;
-            else if (dnsInfo.lookupTime > 3000) score -= 0.15;
-            if (dnsInfo.isCloudflare) score += 0.05;
-            if (dnsInfo.isAWS) score += 0.12;
-            if (dnsInfo.mxRecords?.length > 0) score += 0.08;
-        } else if (dnsInfo && !dnsInfo.success) {
-            score -= 0.2;
-        }
-
-        return Math.max(0, Math.min(1, score));
-    }
-
-    integrateContentAnalysis(assessment) {
-        if (!assessment.contentAnalysis?.fetchSuccess) return;
-
-        const content = assessment.contentAnalysis;
-
-        // Boost scores for good content
-        if (content.industrialIndicators > 0.5 || content.b2bIndicators > 0.5) {
-            assessment.scores.domainQuality = Math.min(1.0, assessment.scores.domainQuality + 0.2);
-        }
-        if (content.industrialIndicators > 0.3) {
-            assessment.scores.contentRelevance = Math.min(1.0, assessment.scores.contentRelevance + 0.3);
-        }
-        if (content.metaTags.description && content.headings.length >= 3) {
-            assessment.scores.technicalQuality = Math.min(1.0, assessment.scores.technicalQuality + 0.1);
-        }
-
-        // Heavy spam penalty
-        if (content.spamIndicators > 0.3) {
-            assessment.scores.spamIndicators = Math.max(0, assessment.scores.spamIndicators - 0.4);
-        }
-    }
-
-    calculateOverallScore(scores) {
-        return (
-            scores.domainQuality * this.SCORING_WEIGHTS.DOMAIN_AUTHORITY +
-            scores.contentRelevance * this.SCORING_WEIGHTS.CONTENT_RELEVANCE +
-            scores.technicalQuality * this.SCORING_WEIGHTS.TECHNICAL_QUALITY +
-            scores.spamIndicators * this.SCORING_WEIGHTS.SPAM_INDICATORS
-        );
-    }
-
-    generateRecommendation(score) {
-        if (score >= QUALITY_THRESHOLDS.HIGH_QUALITY) return QUALITY_LABELS.HIGH_QUALITY;
-        if (score >= QUALITY_THRESHOLDS.MEDIUM_QUALITY) return QUALITY_LABELS.MEDIUM_QUALITY;
-        return QUALITY_LABELS.LOW_QUALITY;
-    }
-
-    collectFlags(assessment, domain, path, fullUrl) {
-        const { scores, tfidfAnalysis, dnsInfo } = assessment;
-        
-        // Critical issues
-        if (dnsInfo?.isBlacklistedIP) {
-            assessment.flags.push('BLACKLISTED_IP');
-            assessment.reasons.push(`blacklisted IP detected: ${dnsInfo.blacklistedIPs.join(', ')}`);
-        }
-        
-        if (scores.spamIndicators < 0.2) {
-            assessment.flags.push('CRITICAL_SPAM_DETECTED');
-            assessment.reasons.push('critical spam indicators in URL detected');
-        }
-        
-        if (tfidfAnalysis?.spamAnalysis?.criticalSpam?.length > 0) {
-            assessment.flags.push('META_SPAM');
-            const spamKeywords = tfidfAnalysis.detectedSpamKeywords?.slice(0, 3).join(', ') || 'various';
-            assessment.reasons.push(`spam patterns in meta content: ${spamKeywords}`);
-        }
-        
-        // Positive indicators
-        if (tfidfAnalysis?.professionalScore > 1.0) {
-            assessment.flags.push('PROFESSIONAL_CONTENT');
-            assessment.reasons.push(`excellent professional content (score: ${tfidfAnalysis.professionalScore.toFixed(1)})`);
-        }
-
-        // Technical issues
-        if (!assessment.contentAnalysis?.fetchSuccess) {
-            assessment.flags.push('NO_CONTENT_ANALYSIS');
-            assessment.reasons.push('content analysis unavailable - technical issues');
-        }
-
-        // Domain quality
-        if (globalThis.keywordConfig?.WHITELISTED_DOMAINS?.some(d => domain.includes(d))) {
-            assessment.flags.push('WHITELISTED_DOMAIN');
-            assessment.reasons.push('domain is whitelisted - trusted source');
-        }
-
-        const tld = domain.substring(domain.lastIndexOf('.'));
-        if (globalThis.keywordConfig?.SUSPICIOUS_TLDS?.includes(tld)) {
-            assessment.flags.push('SUSPICIOUS_TLD');
-            assessment.reasons.push(`suspicious top-level domain: ${tld}`);
-        }
-
-        // DNS quality indicators
-        if (dnsInfo?.isEnterprise) {
-            assessment.flags.push('ENTERPRISE_HOSTING');
-            assessment.reasons.push(`enterprise-grade hosting: ${dnsInfo.hostingProvider || 'detected'}`);
-        }
-    }
-
-    async assessURL(url, impressions = 0, enableContentFetch = true) {
-        if (!url?.trim()) {
-            return {
-                url: url || 'N/A', error: 'Empty or invalid URL provided',
-                recommendation: QUALITY_LABELS.LOW_QUALITY, overallScore: 0,
-                reasons: ['empty or invalid url'], metaKeywords: 'invalid url',
-                flaggedTerms: ''
-            };
-        }
-
-        try {
-            const normalizedUrl = this.validateAndNormalizeURL(url);
-            let domain, path, params, fullUrl;
-            
-            try {
-                const urlObj = new URL(normalizedUrl);
-                domain = urlObj.hostname.toLowerCase();
-                path = urlObj.pathname.toLowerCase();
-                params = urlObj.search.toLowerCase();
-                fullUrl = normalizedUrl.toLowerCase();
-            } catch (urlError) {
-                domain = this.extractDomainSafely(url);
-                path = params = '';
-                fullUrl = normalizedUrl.toLowerCase();
-            }
-
-            const assessment = {
-                url, domain, impressions, scores: {}, flags: [], overallScore: 0,
-                recommendation: '', reasons: [], contentAnalysis: null, dnsInfo: null,
-                metaKeywords: 'content analysis pending', tfidfAnalysis: null,
-                urlSpamKeywords: [], flaggedTerms: ''
-            };
-
-            // DNS lookup
-            try {
-                assessment.dnsInfo = await this.performAdvancedDNSLookup(domain);
-            } catch (error) {
-                assessment.dnsInfo = { success: false, error: error.message, lookupTime: 0 };
-            }
-
-            // Core assessments
-            assessment.scores.domainQuality = this.assessDomainQuality(domain);
-            assessment.scores.contentRelevance = this.assessContentRelevance(fullUrl, domain, path);
-            assessment.scores.technicalQuality = this.assessTechnicalQuality(domain, path, params, assessment.dnsInfo);
-            
-            const urlSpamResult = this.assessURLSpamIndicators(fullUrl, domain);
-            assessment.scores.spamIndicators = urlSpamResult.score;
-            assessment.urlSpamKeywords = urlSpamResult.detectedSpamKeywords;
-
-            // Content analysis
-            if (enableContentFetch) {
-                try {
-                    assessment.contentAnalysis = await this.fetchAndAnalyzeContentWithTimeout(normalizedUrl);
-                    
-                    if (assessment.contentAnalysis?.fetchSuccess) {
-                        assessment.tfidfAnalysis = this.tfidfAnalyzer.extractAndAnalyzeMetaContent(assessment.contentAnalysis.rawHtml);
-                        
-                        // Apply TF-IDF results
-                        const metaSpamPenalty = Math.abs(assessment.tfidfAnalysis.spamScore) * 0.5;
-                        assessment.scores.spamIndicators = Math.max(0, assessment.scores.spamIndicators - metaSpamPenalty);
-                        
-                        const professionalBoost = Math.min(0.4, assessment.tfidfAnalysis.professionalScore * 0.2);
-                        assessment.scores.contentRelevance = Math.min(1.0, assessment.scores.contentRelevance + professionalBoost);
-                        
-                        // Combine spam keywords from URL and meta content
-                        const allSpamKeywords = [
-                            ...assessment.urlSpamKeywords,
-                            ...(assessment.tfidfAnalysis.detectedSpamKeywords || []),
-                            ...(assessment.contentAnalysis.detectedSpamKeywords || [])
-                        ];
-                        const uniqueSpamKeywords = [...new Set(allSpamKeywords)];
-                        
-                        if (uniqueSpamKeywords.length > 0) {
-                            assessment.metaKeywords = `SPAM DETECTED: ${uniqueSpamKeywords.slice(0, 5).join(', ')} | ${assessment.tfidfAnalysis.combinedKeywords}`;
-                        } else {
-                            assessment.metaKeywords = assessment.tfidfAnalysis.combinedKeywords;
-                        }
-
-                        // Generate flagged terms
-                        assessment.flaggedTerms = this.generateFlaggedTerms(
-                            assessment.urlSpamKeywords,
-                            assessment.tfidfAnalysis.detectedSpamKeywords || [],
-                            assessment.contentAnalysis.detectedSpamKeywords || []
-                        );
-                    }
-                    
-                    this.integrateContentAnalysis(assessment);
-                } catch (error) {
-                    assessment.flags.push('CONTENT_FETCH_FAILED');
-                    assessment.metaKeywords = error.message.includes('timeout') ? 
-                        `content fetch timeout (>${URL_TIMEOUT_SECONDS}s)` : 'content fetch failed';
-                }
-            } else {
-                assessment.metaKeywords = 'content fetch disabled';
-                // Generate flagged terms from URL only
-                assessment.flaggedTerms = this.generateFlaggedTerms(assessment.urlSpamKeywords, [], []);
-            }
-
-            assessment.overallScore = this.calculateOverallScore(assessment.scores);
-            assessment.recommendation = this.generateRecommendation(assessment.overallScore);
-            this.collectFlags(assessment, domain, path, fullUrl);
-
-            return assessment;
-
-        } catch (error) {
-            return {
-                url, error: `Assessment error: ${error.message}`,
-                recommendation: QUALITY_LABELS.LOW_QUALITY, overallScore: 0,
-                reasons: ['url assessment failed'], metaKeywords: 'assessment failed',
-                flaggedTerms: ''
-            };
-        }
-    }
-
-    generateFlaggedTerms(urlSpamKeywords, metaSpamKeywords, contentSpamKeywords) {
-        const flaggedParts = [];
-        
-        if (urlSpamKeywords.length > 0) {
-            flaggedParts.push(`URL: ${urlSpamKeywords.slice(0, 5).join(', ')}`);
-        }
-        
-        const allMetaKeywords = [...new Set([...metaSpamKeywords, ...contentSpamKeywords])];
-        if (allMetaKeywords.length > 0) {
-            flaggedParts.push(`Meta Content: ${allMetaKeywords.slice(0, 5).join(', ')}`);
-        }
-        
-        return flaggedParts.join('\n');
-    }
-
-    getSlowUrls() {
-        if (this.fetchTimes.length === 0) return [];
-        const sorted = [...this.fetchTimes].sort((a, b) => b.duration - a.duration);
-        return sorted.slice(0, Math.floor(sorted.length * 0.2));
-    }
-}
-
-async function checkPlacementWithQualityAnalysis(performanceMaxPlacement) {
-    // Initialize managers
-    if (typeof globalThis.blocklistManager === 'undefined') {
-        globalThis.blocklistManager = new BlocklistManager();
-        if (globalThis.blocklistManager.shouldRefreshBlocklist()) {
-            await globalThis.blocklistManager.fetchBlocklist();
-        }
-    }
+function main() {
+  const start_time = new Date();
+  console.log('Starting PMAX Placement Analysis...');
+  
+  const timings = {};
+  
+  try {
+    // Step 1: Fetch blacklists
+    timings.blacklist_fetch = time_function(() => fetch_all_blacklists());
     
-    if (typeof globalThis.urlAssessor === 'undefined') {
-        globalThis.urlAssessor = new EnterpriseURLQualityAssessor();
-    }
+    // NEW: Validate IP matching functionality
+    validate_ip_matching();
     
-    // Check blocklist first
-    if (performanceMaxPlacement.targetUrl) {
-        try {
-            const domain = globalThis.urlAssessor.extractDomainSafely(performanceMaxPlacement.targetUrl);
-            if (globalThis.blocklistManager.isDomainBlocked(domain)) {
-                return {
-                    exclude: true,
-                    reason: 'domain found in external blocklist - automatic exclusion for security',
-                    score: 0,
-                    suggestion: QUALITY_LABELS.LOW_QUALITY,
-                    metaKeywords: 'BLOCKLIST_MATCH',
-                    blocklistMatch: true,
-                    flaggedTerms: 'URL: blocklist match'
-                };
-            }
-        } catch (error) {
-            console.log(`Error checking blocklist: ${error.message}`);
-        }
-    }
-    
-    // Handle different placement types
-    if (performanceMaxPlacement.placementType == 'MOBILE_APPLICATION') {
-        return {
-            exclude: true,
-            reason: 'mobile app placement - exclude',
-            score: 0.1,
-            suggestion: QUALITY_LABELS.LOW_QUALITY,
-            metaKeywords: 'mobile app',
-            flaggedTerms: ''
-        };
-    }
-
-    if (performanceMaxPlacement.placementType == 'YOUTUBE_VIDEO') {
-        return {
-            exclude: true,
-            reason: 'youtube video placement - exclude',
-            score: 0.2,
-            suggestion: QUALITY_LABELS.LOW_QUALITY,
-            metaKeywords: 'youtube video',
-            flaggedTerms: ''
-        };
-    }
-
-    if (performanceMaxPlacement.placementType == 'WEBSITE') {
-        try {
-            const assessment = await globalThis.urlAssessor.assessURL(
-                performanceMaxPlacement.targetUrl,
-                performanceMaxPlacement.impressions,
-                true
-            );
-
-            let reason = assessment.reasons ? assessment.reasons.join(', ') : '';
-            
-            if (assessment.tfidfAnalysis) {
-                if (assessment.tfidfAnalysis.spamAnalysis.criticalSpam.length > 0) {
-                    reason += (reason ? ', ' : '') + 'critical meta spam content detected';
-                }
-                if (assessment.tfidfAnalysis.professionalScore > 1.0) {
-                    reason += (reason ? ', ' : '') + 'likely professional/technical content detected';
-                }
-            }
-
-            if (assessment.dnsInfo?.isBlacklistedIP) {
-                reason += (reason ? ', ' : '') + 'hosting on blacklisted IP addresses';
-            }
-
-            return {
-                exclude: assessment.recommendation === QUALITY_LABELS.LOW_QUALITY,
-                reason: reason || 'standard quality assessment completed',
-                score: assessment.overallScore,
-                suggestion: assessment.recommendation,
-                metaKeywords: assessment.metaKeywords,
-                blocklistMatch: false,
-                flaggedTerms: assessment.flaggedTerms || ''
-            };
-
-        } catch (error) {
-            return {
-                exclude: true,
-                reason: 'analysis failed - unable to assess quality due to technical issues',
-                score: 0,
-                suggestion: QUALITY_LABELS.LOW_QUALITY,
-                metaKeywords: 'analysis failed',
-                flaggedTerms: ''
-            };
-        }
-    }
-
-    return {
-        exclude: false,
-        reason: 'no quality issues detected - placement type likely acceptable',
-        score: 0.8,
-        suggestion: QUALITY_LABELS.HIGH_QUALITY,
-        metaKeywords: 'other placement type',
-        flaggedTerms: ''
-    };
-}
-
-function getDateRange(lookbackDays) {
-    const endDate = new Date();
-    const startDate = new Date();
-    startDate.setDate(endDate.getDate() - lookbackDays);
-    
-    return {
-        startDate: Utilities.formatDate(startDate, AdsApp.currentAccount().getTimeZone(), 'yyyy-MM-dd'),
-        endDate: Utilities.formatDate(endDate, AdsApp.currentAccount().getTimeZone(), 'yyyy-MM-dd')
-    };
-}
-
-// ... [Include all remaining classes unchanged] ...
-
-async function main() {
-    const startTime = new Date();
-    console.log('Starting Enhanced Performance Max Placement Analysis...');
-    
-    // Log configuration
-    console.log(`\n=== CONFIGURATION ===`);
-    console.log(`Add to Account Exclusions: ${ADD_TO_ACCOUNT_EXCLUSIONS}`);
-    console.log(`Auto-Exclusion Threshold: ${AUTO_EXCLUSION_THRESHOLD}`);
-    console.log(`Dry Run Mode: ${DRY_RUN_MODE}`);
-    
-    // Initialize cache manager and show cache stats
-    const cacheManager = new CacheManager();
-    const cacheStats = cacheManager.getCacheStats();
-    console.log(`\n=== CACHE STATUS ===`);
-    console.log(`Total cache entries: ${cacheStats.totalKeys}`);
-    console.log(`Cached data size: ${Math.round(cacheStats.totalSize / 1024)}KB`);
-    cacheStats.cacheKeys.forEach(item => {
-        console.log(`- ${item.key}: ${item.chunks} chunks, ${Math.round(item.size / 1024)}KB, ${item.age} old`);
+    // Step 2: Fetch PMAX placements
+    timings.pmax_fetch = time_function(() => {
+      return fetch_pmax_placements();
     });
     
-    // Initialize configurations
-    if (typeof globalThis.keywordConfig === 'undefined') {
-        globalThis.keywordConfig = new KeywordConfiguration();
-        await globalThis.keywordConfig.initializeSuspiciousTLDs(); // Async TLD fetch with caching
-        await globalThis.keywordConfig.initializeSpamKeywords(); // Async spam keywords fetch with caching
-    }
+    const placements = fetch_pmax_placements();
     
-    if (typeof globalThis.blocklistManager === 'undefined') {
-        globalThis.blocklistManager = new BlocklistManager();
-        await globalThis.blocklistManager.fetchBlocklist();
-    }
+    // Step 3-8: Analyze placements
+    timings.analysis = time_function(() => analyze_placements(placements));
+    
+    // NEW Step 9: Fetch Open Page Rank data
+    timings.opr_fetch = time_function(() => fetch_open_page_rank_data(placements));
+    
+    // NEW Step 10: Apply Open Page Rank data
+    timings.opr_apply = time_function(() => apply_open_page_rank_data(placements));
+    
+    // Step 11: Output results (previously step 9)
+    timings.output = time_function(() => output_results(placements, timings, start_time));
+    
+    // Log summary
+    log_summary(timings, placements.length, start_time);
+    
+  } catch (error) {
+    console.error('Script execution failed:', error);
+    throw error;
+  }
+}
 
-    // Initialize exclusion manager
-    const exclusionManager = new AccountExclusionManager();
+/**
+ * Load multiple IP blocklists with deduplication and source tracking
+ */
+function load_ip_blocklists() {
+  console.log('Fetching IP blocklists...');
+  const ips = new Map(); // ip -> source_url
+  let total_loaded = 0;
+  
+  CONFIG.IP_BLOCKLIST.forEach((url, index) => {
+    try {
+      console.log(`Loading IP list ${index + 1}/${CONFIG.IP_BLOCKLIST.length} from: ${extractListName(url)}`);
+      const response = fetchWithTimeout(url);
+      
+      if (response && response.getResponseCode() === 200) {
+        let count = 0;
+        
+        response.getContentText().split('\n').forEach(line => {
+          const trimmed = line.trim();
+          if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('//')) {
+            // Extract IP from various formats
+            let ip = trimmed;
+            
+            // Handle different formats:
+            // - "1.2.3.4/32" (CIDR)
+            // - "1.2.3.4 # comment" (IP with comment)
+            // - "1.2.3.4	malware" (IP with tab-separated info)
+            if (ip.includes(' ')) {
+              ip = ip.split(' ')[0];
+            }
+            if (ip.includes('\t')) {
+              ip = ip.split('\t')[0];
+            }
+            
+            // Validate IP format (basic check for IPv4)
+            if (ip.match(/^\d+\.\d+\.\d+\.\d+(\/\d+)?$/)) {
+              if (!ips.has(ip)) {
+                ips.set(ip, url);
+                count++;
+              }
+            }
+          }
+        });
+        
+        console.log(`  Loaded ${count} IPs from ${extractListName(url)}`);
+        total_loaded += count;
+      } else {
+        throw new Error(`HTTP ${response ? response.getResponseCode() : 'unknown'}`);
+      }
+    } catch (error) {
+      console.warn(`Failed to load IP list from ${url}:`, error);
+    }
+  });
+  
+  console.log(`Total unique blacklisted IPs loaded: ${ips.size} (${total_loaded} total entries processed)`);
+  return ips;
+}
+
+/**
+ * Quick IP matching validation with source tracking
+ */
+function validate_ip_matching() {
+  console.log('Validating IP matching with sample data...');
+  
+  const sample_tests = [
+    '1.0.170.118',  // Should match exact IP
+    '1.10.16.5',    // Should match /20 range
+    '1.19.100.1',   // Should match /16 range
+    '8.8.8.8',      // Should NOT match (Google DNS)
+    '1.1.1.1'       // Should NOT match (Cloudflare DNS)
+  ];
+  
+  let matches = 0;
+  sample_tests.forEach(ip => {
+    const is_blocked = is_ip_blacklisted(ip);
+    if (is_blocked) {
+      matches++;
+      // Try to find which list blocked this IP
+      let source = 'unknown';
+      if (blacklisted_ips.has(ip)) {
+        source = extractListName(blacklisted_ips.get(ip));
+      } else if (blacklisted_ips.has(`${ip}/32`)) {
+        source = extractListName(blacklisted_ips.get(`${ip}/32`));
+      }
+      console.log(`IP ${ip}: BLOCKED (from ${source})`);
+    } else {
+      console.log(`IP ${ip}: ALLOWED`);
+    }
+  });
+  
+  console.log(`IP validation complete: ${matches}/${sample_tests.length} test IPs were blocked`);
+  console.log(`Total IP entries in blacklist: ${blacklisted_ips.size}`);
+}
+
+/**
+ * Check if IP is blacklisted - UPDATED FOR MAP
+ */
+function is_ip_blacklisted(ip) {
+  if (!ip || typeof ip !== 'string') {
+    return false;
+  }
+  
+  // Direct IP match (exact match)
+  if (blacklisted_ips.has(ip)) {
+    return true;
+  }
+  
+  // Check for /32 notation match
+  const exact_match = `${ip}/32`;
+  if (blacklisted_ips.has(exact_match)) {
+    return true;
+  }
+  
+  // Check against all CIDR ranges in blacklist
+  for (const [blocked_cidr, source] of blacklisted_ips) {
+    if (blocked_cidr.includes('/')) {
+      if (is_ip_in_cidr(ip, blocked_cidr)) {
+        return true;
+      }
+    } else {
+      // Handle entries without CIDR notation (treat as exact match)
+      if (blocked_cidr === ip) {
+        return true;
+      }
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Check if IP is in CIDR range - IMPROVED VERSION
+ */
+function is_ip_in_cidr(ip, cidr) {
+  try {
+    if (!cidr.includes('/')) {
+      // If no CIDR notation, treat as exact match
+      return ip === cidr;
+    }
     
-    const accountName = AdsApp.currentAccount().getName();
-    const allResults = [];
-    const analysisResults = [];
-    const placementsForExclusion = [];
-    const uniqueUrls = new Set();
-    let lowQualityCount = 0;
-    let blocklistMatchCount = 0;
+    const [network, prefix_length] = cidr.split('/');
+    const prefix = parseInt(prefix_length);
     
-    const dateRange = getDateRange(LOOKBACK_WINDOW);
+    // Validate inputs
+    if (isNaN(prefix) || prefix < 0 || prefix > 32) {
+      return false;
+    }
     
+    // Convert IP addresses to integers
+    const ip_parts = ip.split('.').map(Number);
+    const network_parts = network.split('.').map(Number);
+    
+    // Validate IP format
+    if (ip_parts.length !== 4 || network_parts.length !== 4) {
+      return false;
+    }
+    
+    if (ip_parts.some(part => isNaN(part) || part < 0 || part > 255) ||
+        network_parts.some(part => isNaN(part) || part < 0 || part > 255)) {
+      return false;
+    }
+    
+    // Convert to 32-bit integers
+    const ip_int = (ip_parts[0] << 24) + (ip_parts[1] << 16) + (ip_parts[2] << 8) + ip_parts[3];
+    const network_int = (network_parts[0] << 24) + (network_parts[1] << 16) + (network_parts[2] << 8) + network_parts[3];
+    
+    // Create subnet mask
+    const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+    
+    // Check if IP is in the network
+    return (ip_int & mask) === (network_int & mask);
+    
+  } catch (error) {
+    console.warn(`Error checking CIDR ${cidr} for IP ${ip}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Get date range for GAQL query
+ */
+function getDateRange(daysBack) {
+  const endDate = new Date();
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - daysBack);
+  
+  return {
+    startDate: formatDate(startDate),
+    endDate: formatDate(endDate)
+  };
+}
+
+/**
+ * Format date for GAQL query (YYYY-MM-DD)
+ */
+function formatDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Fetch with timeout (synchronous version for Google Apps Script)
+ */
+function fetchWithTimeout(url, timeoutMs = 30000) {
+  try {
+    const response = UrlFetchApp.fetch(url, {
+      method: 'GET',
+      muteHttpExceptions: true,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; GoogleAdsBot/1.0)'
+      }
+    });
+    return response;
+  } catch (error) {
+    console.error(`Fetch failed for ${url}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Load spam keywords with deduplication
+ */
+function loadSpamKeywords() {
+  try {
+    console.log('Fetching spam keywords...');
+    const response = fetchWithTimeout(CONFIG.SPAM_KEYWORDS);
+
+    if (response && response.getResponseCode() === 200) {
+      const keywords_set = new Set();
+      
+      response.getContentText()
+        .split('\n')
+        .forEach(line => {
+          const keyword = line.trim().toLowerCase();
+          if (keyword && !keyword.startsWith('#') && !keyword.startsWith('//')) {
+            keywords_set.add(keyword);
+          }
+        });
+      
+      const keywords = Array.from(keywords_set);
+      console.log(`Loaded ${keywords.length} unique spam keywords`);
+      return keywords;
+    } else {
+      throw new Error(`HTTP ${response ? response.getResponseCode() : 'unknown'}`);
+    }
+  } catch (error) {
+    console.warn('Failed to load spam keywords:', error);
+    return [];
+  }
+}
+
+/**
+ * Load whitelist domains with deduplication
+ */
+function loadWhitelistDomains() {
+  try {
+    console.log('Fetching whitelist domains...');
+    const response = fetchWithTimeout(CONFIG.WHITELIST_DOMAINS);
+
+    if (response && response.getResponseCode() === 200) {
+      const domains = new Set();
+      
+      response.getContentText()
+        .split('\n')
+        .forEach(line => {
+          const domain = line.trim().toLowerCase();
+          if (domain && !domain.startsWith('#') && !domain.startsWith('//')) {
+            domains.add(domain);
+          }
+        });
+      
+      console.log(`Loaded ${domains.size} unique whitelist domains`);
+      return domains;
+    } else {
+      throw new Error(`HTTP ${response ? response.getResponseCode() : 'unknown'}`);
+    }
+  } catch (error) {
+    console.warn('Failed to load whitelist domains:', error);
+    return new Set();
+  }
+}
+
+/**
+ * Extract TLD from line (expecting format: .tld)
+ */
+function extractTld(line) {
+  const tld = line.trim().toLowerCase();
+  
+  if (!tld || tld.startsWith('#') || tld.startsWith('//')) {
+    return null;
+  }
+  
+  // Expecting format: .tld (e.g., .com, .tk, .0, .537z)
+  if (tld.startsWith('.')) {
+    const extracted_tld = tld.substring(1); // Remove the leading dot
+    
+    // Validate TLD (must be 1+ characters)
+    if (extracted_tld.length >= 1) {
+      return extracted_tld;
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Load suspicious TLDs from multiple sources with deduplication and source tracking
+ */
+function loadSuspiciousTlds() {
+  const tlds = new Map(); // tld -> source_url
+  let total_loaded = 0;
+  let filtered_count = 0;
+  
+  CONFIG.SUSPICIOUS_TLDS.forEach((url, index) => {
+    try {
+      console.log(`Fetching suspicious TLD list ${index + 1}/${CONFIG.SUSPICIOUS_TLDS.length}...`);
+      const response = fetchWithTimeout(url);
+
+      if (response && response.getResponseCode() === 200) {
+        let tlds_added = 0;
+        let tlds_filtered = 0;
+        
+        response.getContentText()
+          .split('\n')
+          .forEach(line => {
+            const extracted_tld = extractTld(line);
+            if (extracted_tld) {
+              // Filter out specific legitimate TLDs
+              if (CONFIG.FILTER_OUT_TLDS.includes(extracted_tld)) {
+                tlds_filtered++;
+                filtered_count++;
+              } else {
+                if (!tlds.has(extracted_tld)) {
+                  tlds.set(extracted_tld, url);
+                  tlds_added++;
+                }
+              }
+            }
+          });
+        
+        console.log(`Loaded ${tlds_added} unique TLDs from list ${index + 1} (filtered out ${tlds_filtered} legitimate TLDs)`);
+        total_loaded += tlds_added;
+      } else {
+        throw new Error(`HTTP ${response ? response.getResponseCode() : 'unknown'}`);
+      }
+    } catch (error) {
+      console.warn(`Failed to load TLD list ${index + 1}: ${url}`, error);
+    }
+  });
+  
+  // Add fallback TLDs if no lists loaded successfully (excluding filtered ones)
+  if (tlds.size === 0) {
+    console.warn('No TLD lists loaded successfully, adding fallback suspicious TLDs');
+    const fallback_tlds = ['tk', 'ml', 'ga', 'cf', 'top', 'click', 'download', 'zip', 'review', 'country', 'stream'];
+    fallback_tlds.forEach(tld => {
+      if (!CONFIG.FILTER_OUT_TLDS.includes(tld)) {
+        tlds.set(tld, 'fallback');
+      }
+    });
+  }
+  
+  console.log(`Total unique suspicious TLDs loaded: ${tlds.size} (filtered out ${filtered_count} legitimate TLDs total)`);
+  return tlds;
+}
+
+/**
+ * Load domain blocklists with deduplication and source tracking
+ */
+function loadDomainBlocklists() {
+  const domains = new Map(); // domain -> source_url
+  
+  CONFIG.DOMAIN_BLOCKLIST.forEach((url, index) => {
+    try {
+      console.log(`Fetching domain blocklist ${index + 1}/${CONFIG.DOMAIN_BLOCKLIST.length}...`);
+      const response = fetchWithTimeout(url);
+
+      if (response && response.getResponseCode() === 200) {
+        let domains_added = 0;
+        
+        response.getContentText()
+          .split('\n')
+          .forEach(line => {
+            const trimmed = line.trim().toLowerCase();
+            if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('//')) {
+              // Handle different formats (hosts file, adblock, plain domains)
+              let domain = trimmed;
+              
+              // Remove hosts file format (0.0.0.0 domain.com or 127.0.0.1 domain.com)
+              if (domain.includes(' ')) {
+                const parts = domain.split(' ');
+                domain = parts[parts.length - 1];
+              }
+              
+              // Remove adblock format (||domain.com^)
+              domain = domain.replace(/^\|\|/, '').replace(/\^.*$/, '');
+              
+              // Validate domain format
+              if (domain.includes('.') && !domain.includes('/') && domain.length > 3) {
+                if (!domains.has(domain)) {
+                  domains.set(domain, url);
+                  domains_added++;
+                }
+              }
+            }
+          });
+        
+        console.log(`Loaded ${domains_added} unique domains from blocklist ${index + 1}`);
+      } else {
+        throw new Error(`HTTP ${response ? response.getResponseCode() : 'unknown'}`);
+      }
+    } catch (error) {
+      console.warn(`Failed to load blocklist ${index + 1}: ${url}`, error);
+    }
+  });
+  
+  console.log(`Total unique domains loaded: ${domains.size}`);
+  return domains;
+}
+
+/**
+ * Fetch all blacklists and populate global variables
+ */
+function fetch_all_blacklists() {
+  console.log('Fetching blacklists...');
+  
+  // Load all blacklists with deduplication and source tracking
+  spam_keywords = loadSpamKeywords();
+  whitelisted_domains = loadWhitelistDomains();
+  suspicious_tlds = loadSuspiciousTlds();
+  blacklisted_domains = loadDomainBlocklists();
+  blacklisted_ips = load_ip_blocklists(); // UPDATED: Use new function
+  
+  console.log('\n=== BLACKLIST SUMMARY ===');
+  console.log(`Spam keywords: ${spam_keywords.length} unique entries`);
+  console.log(`Whitelisted domains: ${whitelisted_domains.size} unique entries`);
+  console.log(`Suspicious TLDs: ${suspicious_tlds.size} unique entries`);
+  console.log(`Blacklisted domains: ${blacklisted_domains.size} unique entries`);
+  console.log(`Blacklisted IPs: ${blacklisted_ips.size} unique entries`);
+  console.log('========================\n');
+}
+
+/**
+ * Fetch PMAX placements using Google Ads API
+ */
+function fetch_pmax_placements() {
+  console.log('Fetching PMAX placements...');
+  
+  try {
+    // Get date range
+    const dateRange = getDateRange(CONFIG.DATES_BACK);
+
+    // Fetch placements
     const query = `
-        SELECT campaign.id, performance_max_placement_view.display_name, 
-               performance_max_placement_view.placement, performance_max_placement_view.placement_type, 
-               performance_max_placement_view.resource_name, performance_max_placement_view.target_url, 
-               metrics.impressions
-        FROM performance_max_placement_view
-        WHERE metrics.impressions > ${MIN_IMPRESSIONS}
-          AND segments.date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'
-        ORDER BY metrics.impressions DESC
+      SELECT campaign.id, performance_max_placement_view.display_name, 
+             performance_max_placement_view.placement, performance_max_placement_view.placement_type, 
+             performance_max_placement_view.resource_name, performance_max_placement_view.target_url, 
+             metrics.impressions
+      FROM performance_max_placement_view
+      WHERE metrics.impressions > ${CONFIG.MIN_IMPRESSIONS}
+        AND segments.date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'
+        AND performance_max_placement_view.placement_type NOT IN ('YOUTUBE_CHANNEL', 'YOUTUBE_VIDEO')
+      ORDER BY metrics.impressions DESC
     `;
     
-    console.log('Executing GAQL query...');
+    const placements = [];
+    
+    // Check if we're in MCC context
+    if (typeof AdsManagerApp !== 'undefined') {
+      // MCC context - iterate through accounts
+      const account_iterator = AdsManagerApp.accounts().get();
+      
+      while (account_iterator.hasNext()) {
+        const account = account_iterator.next();
+        
+        try {
+          AdsManagerApp.select(account);
+          const report = AdsApp.report(query);
+          const rows = report.rows();
+          
+          while (rows.hasNext()) {
+            const row = rows.next();
+            
+            placements.push({
+              target_url: row['performance_max_placement_view.target_url'],
+              placement: row['performance_max_placement_view.placement'],
+              display_name: row['performance_max_placement_view.display_name'],
+              placement_type: row['performance_max_placement_view.placement_type'],
+              resource_name: row['performance_max_placement_view.resource_name'],
+              campaign_id: row['campaign.id'],
+              campaign_name: '',
+              impressions: parseInt(row['metrics.impressions']),
+              customer_id: account.getCustomerId(),
+              customer_name: account.getName(),
+              action: 'NEUTRAL',
+              reason: '',
+              reference_list: '',
+              // NEW FIELDS for Open Page Rank
+              page_rank: null,
+              domain_rank: null,
+              opr_status: null
+            });
+          }
+        } catch (error) {
+          console.warn(`Failed to fetch data for account ${account.getCustomerId()}:`, error);
+        }
+      }
+    } else {
+      // Single account context
+      try {
+        const report = AdsApp.report(query);
+        const rows = report.rows();
+        
+        while (rows.hasNext()) {
+          const row = rows.next();
+          
+          placements.push({
+            target_url: row['performance_max_placement_view.target_url'],
+            placement: row['performance_max_placement_view.placement'],
+            display_name: row['performance_max_placement_view.display_name'],
+            placement_type: row['performance_max_placement_view.placement_type'],
+            resource_name: row['performance_max_placement_view.resource_name'],
+            campaign_id: row['campaign.id'],
+            campaign_name: '', // Not available in this query structure
+            impressions: parseInt(row['metrics.impressions']),
+            customer_id: AdsApp.currentAccount().getCustomerId(),
+            customer_name: AdsApp.currentAccount().getName(),
+            action: 'NEUTRAL',
+            reason: '',
+            reference_list: ''
+          });
+        }
+      } catch (error) {
+        console.error('Failed to fetch data from single account:', error);
+        throw error;
+      }
+    }
+    
+    console.log(`Fetched ${placements.length} placements`);
+    return placements;
+    
+  } catch (error) {
+    console.error('Failed to fetch PMAX placements:', error);
+    throw error;
+  }
+}
+
+/**
+ * Fetch Open Page Rank data for unique domains
+ */
+function fetch_open_page_rank_data(placements) {
+  if (!CONFIG.OPR_ENABLED || !CONFIG.OPR_API_KEY || CONFIG.OPR_API_KEY === 'YOUR-API-KEY-HERE') {
+    console.log('Open Page Rank API disabled or not configured');
+    return;
+  }
+  
+  console.log('Fetching Open Page Rank data...');
+  
+  // Extract unique domains from placements
+  const unique_domains = new Set();
+  placements.forEach(placement => {
+    if (placement.target_url) {
+      const domain = extract_domain(placement.target_url);
+      if (domain) {
+        unique_domains.add(domain);
+      }
+    }
+  });
+  
+  const domains_array = Array.from(unique_domains);
+  console.log(`Found ${domains_array.length} unique domains for OPR lookup`);
+  
+  // Process domains in batches
+  const batches = [];
+  for (let i = 0; i < domains_array.length; i += CONFIG.OPR_BATCH_SIZE) {
+    batches.push(domains_array.slice(i, i + CONFIG.OPR_BATCH_SIZE));
+  }
+  
+  batches.forEach((batch, index) => {
+    console.log(`Processing OPR batch ${index + 1}/${batches.length} (${batch.length} domains)`);
     
     try {
-        const result = AdsApp.search(query);
-        
-        while (result.hasNext()) {
-            const row = result.next();
-            
-            const placement = {
-                campaignId: row.campaign.id,
-                displayName: row.performanceMaxPlacementView.displayName,
-                placement: row.performanceMaxPlacementView.placement,
-                placementType: row.performanceMaxPlacementView.placementType,
-                resourceName: row.performanceMaxPlacementView.resourceName,
-                targetUrl: row.performanceMaxPlacementView.targetUrl,
-                impressions: row.metrics.impressions
-            };
-            
-            if (placement.targetUrl) uniqueUrls.add(placement.targetUrl);
-            
-            const checkedPlacement = await checkPlacementWithQualityAnalysis(placement);
-            
-            if (checkedPlacement.suggestion === QUALITY_LABELS.LOW_QUALITY) lowQualityCount++;
-            if (checkedPlacement.blocklistMatch) blocklistMatchCount++;
-            
-            // Check if placement should be added to exclusions
-            if (ADD_TO_ACCOUNT_EXCLUSIONS && 
-                (checkedPlacement.suggestion === QUALITY_LABELS.LOW_QUALITY || 
-                 checkedPlacement.score < AUTO_EXCLUSION_THRESHOLD)) {
-                placementsForExclusion.push({
-                    targetUrl: placement.targetUrl,
-                    placementType: placement.placementType,
-                    score: checkedPlacement.score,
-                    reason: checkedPlacement.reason
-                });
-            }
-            
-            allResults.push([
-                placement.campaignId || 'N/A',
-                placement.targetUrl || 'N/A',
-                placement.placementType || 'N/A',
-                placement.impressions || 0
-            ]);
-            
-            analysisResults.push([
-                placement.campaignId || 'N/A',
-                placement.targetUrl || 'N/A',
-                placement.placementType || 'N/A',
-                placement.impressions || 0,
-                Math.round(checkedPlacement.score * 100) / 100,
-                checkedPlacement.suggestion || 'UNKNOWN',
-                checkedPlacement.reason || 'no reason provided',
-                checkedPlacement.metaKeywords || 'no keywords extracted',
-                checkedPlacement.flaggedTerms || ''
-            ]);
-        }
-        
-        // Process exclusions
-        if (placementsForExclusion.length > 0) {
-            console.log(`\nProcessing ${placementsForExclusion.length} placements for exclusion...`);
-            await exclusionManager.addAccountLevelExclusions(placementsForExclusion);
-        } else {
-            console.log('\nNo placements qualified for exclusion.');
-        }
-        
-        const endTime = new Date();
-        const runtime = Math.round((endTime - startTime) / 1000);
-        const slowUrls = globalThis.urlAssessor ? globalThis.urlAssessor.getSlowUrls() : [];
-        const blocklistStats = globalThis.blocklistManager.getBlocklistStats();
-        const spamKeywordsCount = globalThis.keywordConfig?.getSpamKeywords()?.length || 0;
-        const exclusionResults = exclusionManager.getExclusionResults();
-        const finalCacheStats = cacheManager.getCacheStats();
-        
-        console.log(`\n=== ANALYSIS SUMMARY ===`);
-        console.log(`Total Unique URLs: ${uniqueUrls.size}`);
-        console.log(`Total Placements: ${allResults.length}`);
-        console.log(`Low Quality: ${lowQualityCount}`);
-        console.log(`Blocklist Matches: ${blocklistMatchCount}`);
-        console.log(`Exclusion Candidates: ${placementsForExclusion.length}`);
-        console.log(`Actually Excluded: ${exclusionResults.stats.successful}`);
-        console.log(`External Domains: ${blocklistStats.totalDomains}`);
-        console.log(`External IPs: ${blocklistStats.totalIPs}`);
-        console.log(`Spam Keywords: ${spamKeywordsCount}`);
-        console.log(`Cache Size: ${Math.round(finalCacheStats.totalSize / 1024)}KB`);
-        console.log(`Runtime: ${runtime}s`);
-        
-        outputToGoogleSheets(allResults, analysisResults, {
-            uniqueUrls: uniqueUrls.size,
-            totalPlacements: allResults.length,
-            lowQualityCount,
-            blocklistMatchCount,
-            blocklistStats,
-            spamKeywordsCount,
-            exclusionCandidates: placementsForExclusion.length,
-            exclusionResults,
-            cacheStats: finalCacheStats,
-            runtime,
-            accountName,
-            dateRange,
-            slowUrls
+      const opr_data = call_open_page_rank_api(batch);
+      
+      if (opr_data && opr_data.response) {
+        opr_data.response.forEach(domain_data => {
+          domain_page_ranks.set(domain_data.domain, {
+            page_rank_integer: domain_data.page_rank_integer || 0,
+            page_rank_decimal: domain_data.page_rank_decimal || 0,
+            rank: domain_data.rank || null,
+            status_code: domain_data.status_code || 0,
+            error: domain_data.error || ''
+          });
         });
-        
+      }
+      
+      // Rate limiting between batches
+      if (index < batches.length - 1) {
+        Utilities.sleep(1000); // 1 second delay between batches
+      }
+      
     } catch (error) {
-        console.error('Error in main function:', error);
-        throw error;
+      console.warn(`Failed to fetch OPR data for batch ${index + 1}:`, error);
     }
+  });
+  
+  console.log(`Successfully fetched OPR data for ${domain_page_ranks.size} domains`);
 }
 
-function outputToGoogleSheets(allResults, analysisResults, summary) {
+/**
+ * Call Open Page Rank API for a batch of domains
+ */
+function call_open_page_rank_api(domains) {
+  const base_url = 'https://openpagerank.com/api/v1.0/getPageRank';
+  
+  // Build query parameters
+  const query_params = domains.map(domain => `domains[]=${encodeURIComponent(domain)}`).join('&');
+  const full_url = `${base_url}?${query_params}`;
+  
+  try {
+    const response = UrlFetchApp.fetch(full_url, {
+      method: 'GET',
+      headers: {
+        'API-OPR': CONFIG.OPR_API_KEY,
+        'User-Agent': 'GoogleAdsScript/1.0'
+      },
+      muteHttpExceptions: true
+    });
+    
+    if (response.getResponseCode() === 200) {
+      return JSON.parse(response.getContentText());
+    } else {
+      throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+    }
+    
+  } catch (error) {
+    console.error('Open Page Rank API call failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Apply Open Page Rank data to placements
+ */
+function apply_open_page_rank_data(placements) {
+  if (domain_page_ranks.size === 0) {
+    console.log('No Open Page Rank data available');
+    return;
+  }
+  
+  console.log('Applying Open Page Rank data to placements...');
+  
+  placements.forEach(placement => {
+    if (placement.target_url) {
+      const domain = extract_domain(placement.target_url);
+      if (domain && domain_page_ranks.has(domain)) {
+        const opr_data = domain_page_ranks.get(domain);
+        
+        placement.page_rank = opr_data.page_rank_decimal;
+        placement.domain_rank = opr_data.rank;
+        placement.opr_status = opr_data.status_code === 200 ? 'Found' : 'Not Found';
+      }
+    }
+  });
+}
+
+/**
+ * Analyze all placements and flag suspicious ones
+ */
+function analyze_placements(placements) {
+  console.log('Analyzing placements...');
+  
+  placements.forEach(placement => {
+    // Step 3: Check placement type first (auto-exclude apps and YouTube)
+    if (check_auto_exclude_placement_type(placement)) return;
+    
+    if (!placement.target_url) return;
+    
+    const domain = extract_domain(placement.target_url);
+    if (!domain) return;
+    
+    // Step 4: Check if whitelisted (FIRST PRIORITY for domains)
+    if (check_whitelisted_domain(domain, placement)) return;
+    
+    // Step 5: Check against blacklisted domains
+    if (check_blacklisted_domain(domain, placement)) return;
+    
+    // Step 6: Check suspicious TLDs
+    if (check_suspicious_tld(domain, placement)) return;
+    
+    // Step 7: Check spam keywords with improved matching
+    if (check_spam_keywords_improved(domain, placement)) return;
+  });
+  
+  // Step 8: DNS/IP checks (batched)
+  if (blacklisted_ips.size > 0) {
+    perform_dns_checks(placements.filter(p => p.action === 'NEUTRAL'));
+  } else {
+    console.log('Skipping DNS checks - no IP blacklist loaded');
+  }
+}
+
+/**
+ * Check if placement type should be auto-excluded
+ */
+function check_auto_exclude_placement_type(placement) {
+  if (CONFIG.AUTO_EXCLUDE_TYPES.includes(placement.placement_type)) {
+    placement.action = 'EXCLUDE';
+    placement.reason = 'non-website placement; exclude apps + youtube by default';
+    placement.reference_list = '';
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Extract domain from URL
+ */
+function extract_domain(url) {
+  try {
+    // Remove protocol if present
+    let domain = url.replace(/^https?:\/\//, '');
+    
+    // Remove path, query, and fragment
+    domain = domain.split('/')[0].split('?')[0].split('#')[0];
+    
+    // Remove port if present
+    domain = domain.split(':')[0];
+    
+    return domain.toLowerCase();
+  } catch (error) {
+    console.warn(`Failed to extract domain from: ${url}`);
+    return null;
+  }
+}
+
+/**
+ * Check if domain is whitelisted (FIRST PRIORITY)
+ */
+function check_whitelisted_domain(domain, placement) {
+  if (whitelisted_domains.has(domain)) {
+    placement.action = 'KEEP';
+    placement.reason = 'whitelisted domain';
+    placement.reference_list = '';
+    return true;
+  }
+  
+  // Check subdomains against whitelist
+  const parts = domain.split('.');
+  for (let i = 1; i < parts.length; i++) {
+    const subdomain = parts.slice(i).join('.');
+    if (whitelisted_domains.has(subdomain)) {
+      placement.action = 'KEEP';
+      placement.reason = 'whitelisted domain (parent)';
+      placement.reference_list = '';
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Check if domain is blacklisted
+ */
+function check_blacklisted_domain(domain, placement) {
+  if (blacklisted_domains.has(domain)) {
+    const source_url = blacklisted_domains.get(domain);
+    const list_name = extractListName(source_url);
+    placement.action = 'EXCLUDE';
+    placement.reason = `blacklisted domain; reported in ${list_name}`;
+    placement.reference_list = createHyperlink(source_url, list_name);
+    return true;
+  }
+  
+  // Check subdomains
+  const parts = domain.split('.');
+  for (let i = 1; i < parts.length; i++) {
+    const subdomain = parts.slice(i).join('.');
+    if (blacklisted_domains.has(subdomain)) {
+      const source_url = blacklisted_domains.get(subdomain);
+      const list_name = extractListName(source_url);
+      placement.action = 'EXCLUDE';
+      placement.reason = `blacklisted domain (parent); reported in ${list_name}`;
+      placement.reference_list = createHyperlink(source_url, list_name);
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Check if TLD is suspicious
+ */
+function check_suspicious_tld(domain, placement) {
+  const tld = domain.split('.').pop();
+  
+  if (suspicious_tlds.has(tld)) {
+    const source_url = suspicious_tlds.get(tld);
+    const list_name = extractListName(source_url);
+    placement.action = 'EXCLUDE';
+    placement.reason = `suspicious TLD: ${tld}; reported in ${list_name}`;
+    placement.reference_list = createHyperlink(source_url, list_name);
+    return true;
+  }
+  
+  return false;
+}
+
+/**
+ * Check if a character is a word boundary
+ */
+function isWordBoundary(char) {
+  return CONFIG.WORD_BOUNDARY_CHARS.includes(char) || /[^a-z0-9]/i.test(char);
+}
+
+/**
+ * Check if keyword match is valid based on word boundaries
+ */
+function isValidKeywordMatch(domain, keyword, startIndex) {
+  const keywordLength = keyword.length;
+  const endIndex = startIndex + keywordLength;
+  
+  // For short keywords (<=6 chars), require word boundaries
+  if (keywordLength <= CONFIG.SHORT_TERM_LENGTH) {
+    const beforeChar = startIndex > 0 ? domain[startIndex - 1] : '';
+    const afterChar = endIndex < domain.length ? domain[endIndex] : '';
+    
+    // Check if keyword is at word boundary (start/end of domain or separated by boundary chars)
+    const atStart = startIndex === 0 || isWordBoundary(beforeChar);
+    const atEnd = endIndex === domain.length || isWordBoundary(afterChar);
+    
+    return atStart && atEnd;
+  }
+  
+  // For longer keywords, allow substring matches
+  return true;
+}
+
+/**
+ * Improved spam keyword checking with word boundary validation
+ */
+function check_spam_keywords_improved(domain, placement) {
+  if (spam_keywords.length === 0) return false;
+  
+  const found_terms = [];
+  const normalized_domain = domain.toLowerCase();
+  
+  // Check each spam keyword
+  spam_keywords.forEach(keyword => {
+    const normalized_keyword = keyword.toLowerCase().trim();
+    
+    if (normalized_keyword.length === 0) return;
+    
+    // Find all occurrences of the keyword in the domain
+    let index = normalized_domain.indexOf(normalized_keyword);
+    while (index !== -1) {
+      // Check if this match is valid based on word boundaries
+      if (isValidKeywordMatch(normalized_domain, normalized_keyword, index)) {
+        found_terms.push(keyword);
+        break; // Found valid match, no need to check more occurrences of this keyword
+      }
+      
+      // Look for next occurrence
+      index = normalized_domain.indexOf(normalized_keyword, index + 1);
+    }
+  });
+  
+  // Remove duplicates
+  const unique_terms = [...new Set(found_terms)];
+  
+  if (unique_terms.length > 0) {
+    const list_name = extractListName(CONFIG.SPAM_KEYWORDS);
+    placement.action = 'EXCLUDE';
+    placement.reason = `terms detected: ${unique_terms.join(', ')}; reported in ${list_name}`;
+    placement.reference_list = createHyperlink(CONFIG.SPAM_KEYWORDS, list_name);
+    return true;
+  }
+  
+  return false;
+}
+
+/**
+ * Simplified DNS resolver class - UPDATED VERSION
+ */
+class SimpleDNSResolver {
+  resolve_domain_ips(domain) {
+    const dns_info = {
+      success: false,
+      ip_addresses: [],
+      is_blacklisted_ip: false,
+      blacklisted_ips: [],
+      error: null
+    };
+    
     try {
-        const spreadsheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+      const response = UrlFetchApp.fetch(`https://1.1.1.1/dns-query?name=${domain}&type=A`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/dns-json' },
+        muteHttpExceptions: true
+      });
+      
+      if (response.getResponseCode() === 200) {
+        const dns_data = JSON.parse(response.getContentText());
         
-        // Clear and setup sheets
-        let analysisSheet = spreadsheet.getSheetByName('PMAX placement exclusions') || 
-                          spreadsheet.insertSheet('PMAX placement exclusions');
-        analysisSheet.clear();
-        
-        const refreshDate = Utilities.formatDate(new Date(), AdsApp.currentAccount().getTimeZone(), 'yyyy-MM-dd HH:mm:ss');
-        
-        // Headers and summary
-        analysisSheet.getRange(1, 1).setValue('PMAX Placement Evaluator with Auto-Exclusions');
-        analysisSheet.getRange(2, 1).setValue(`Last Refresh: ${refreshDate}`);
-        
-        const summaryData = [
-            ['SUMMARY'],
-            [`Account: ${summary.accountName}`],
-            [`Date Range: ${summary.dateRange.startDate} to ${summary.dateRange.endDate}`],
-            [`Total Placements: ${summary.totalPlacements}`],
-            [`Exclusion Recommendations: ${summary.lowQualityCount}`],
-            [`Exclusion Candidates: ${summary.exclusionCandidates}`],
-            [`Runtime: ${summary.runtime}s`],
-            [`External Blocklist Domains: ${summary.blocklistStats.totalDomains}`],
-            [`External Blocklist IPs: ${summary.blocklistStats.totalIPs}`],
-            [`Spam Keywords: ${summary.spamKeywordsCount}`],
-            [`Blocklist Matches: ${summary.blocklistMatchCount}`],
-            [`'Spam'/Irrelevant Term Source: https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/spam-and-irrelevant-terms`],
-            [`Script Source: https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/pmax-placement-evaluator.gs`]
-        ];
-
-        analysisSheet.getRange(4, 1, summaryData.length, 1).setValues(summaryData);
-
-        // Add hyperlinks to the source URLs
-        const spamSourceRow = 4 + summaryData.length - 2; // Second to last row
-        const scriptSourceRow = 4 + summaryData.length - 1; // Last row
-
-        analysisSheet.getRange(spamSourceRow, 1).setFormula('=HYPERLINK("https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/spam-and-irrelevant-terms", "\'Spam\'/Irrelevant Term Source: https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/spam-and-irrelevant-terms")');
-        analysisSheet.getRange(scriptSourceRow, 1).setFormula('=HYPERLINK("https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/pmax-placement-evaluator.gs", "Script Source: https://github.com/J-Gute/pmax-words-to-exlcude/blob/main/pmax-placement-evaluator.gs")');
-
-        // Analysis headers and data
-        const headers = ['Campaign ID', 'URL', 'Placement Type', 'Impressions', 'Quality Score', 'Suggestion', 'Reason(s)', 'Content Analysis', 'Flagged Terms'];
-        const headerRow = 21;
-        
-        analysisSheet.getRange(headerRow, 1, 1, headers.length).setValues([headers]);
-        analysisSheet.getRange(headerRow, 1, 1, headers.length)
-            .setFontWeight('bold')
-            .setBackground('#A1A1A1')
-            .setFontColor('black');
-        
-        if (analysisResults.length > 0) {
-            analysisSheet.getRange(headerRow + 1, 1, analysisResults.length, headers.length).setValues(analysisResults);
+        if (dns_data.Status === 0 && dns_data.Answer) {
+          dns_info.success = true;
+          
+          // Extract IP addresses from A records only
+          dns_data.Answer
+            .filter(record => record.type === 1) // A records only
+            .forEach(record => {
+              const ip = record.data;
+              dns_info.ip_addresses.push(ip);
+              
+              // Check if this IP is blacklisted
+              if (is_ip_blacklisted(ip)) {
+                dns_info.is_blacklisted_ip = true;
+                dns_info.blacklisted_ips.push(ip);
+              }
+            });
+            
+        } else {
+          dns_info.error = `DNS query failed: Status ${dns_data.Status}`;
         }
-        
-        // Add exclusion details if any
-        if (summary.exclusionResults.excludedDomains.length > 0) {
-            const exclusionHeaderRow = headerRow + analysisResults.length + 3;
-            analysisSheet.getRange(exclusionHeaderRow, 1).setValue('EXCLUDED DOMAINS');
-            analysisSheet.getRange(exclusionHeaderRow, 1).setFontWeight('bold');
-            
-            const exclusionHeaders = ['Domain', 'Score', 'Reason', 'Status'];
-            analysisSheet.getRange(exclusionHeaderRow + 1, 1, 1, exclusionHeaders.length).setValues([exclusionHeaders]);
-            analysisSheet.getRange(exclusionHeaderRow + 1, 1, 1, exclusionHeaders.length)
-                .setFontWeight('bold')
-                .setBackground('#FFE6E6');
-            
-            const exclusionData = summary.exclusionResults.excludedDomains.map(exc => [
-                exc.domain,
-                exc.score,
-                exc.reason,
-                exc.status
-            ]);
-            
-            if (exclusionData.length > 0) {
-                analysisSheet.getRange(exclusionHeaderRow + 2, 1, exclusionData.length, exclusionHeaders.length).setValues(exclusionData);
-            }
-        }
-        
-        // Set column widths
-        [120, 300, 120, 100, 100, 120, 400, 400, 300].forEach((width, i) => {
-            analysisSheet.setColumnWidth(i + 1, width);
-        });
-        
-        console.log(`Results written to Google Sheets: ${analysisResults.length} rows`);
-        
+      } else {
+        dns_info.error = `HTTP ${response.getResponseCode()}`;
+      }
     } catch (error) {
-        console.error('Error writing to Google Sheets:', error);
-        throw error;
+      dns_info.error = error.message;
     }
+    
+    return dns_info;
+  }
 }
 
-function debug(obj) {
-    console.log(JSON.stringify(obj, null, 2));
+/**
+ * Perform DNS checks in batches - UPDATED VERSION
+ */
+function perform_dns_checks(placements) {
+  console.log(`Performing DNS checks for ${placements.length} placements...`);
+  
+  const dns_resolver = new SimpleDNSResolver();
+  const batches = [];
+  
+  for (let i = 0; i < placements.length; i += CONFIG.DNS_BATCH_SIZE) {
+    batches.push(placements.slice(i, i + CONFIG.DNS_BATCH_SIZE));
+  }
+  
+  batches.forEach((batch, index) => {
+    console.log(`Processing DNS batch ${index + 1}/${batches.length}`);
+    
+    batch.forEach(placement => {
+      const domain = extract_domain(placement.target_url);
+      if (!domain) return;
+      
+      try {
+        const dns_info = dns_resolver.resolve_domain_ips(domain);
+        
+        if (dns_info.is_blacklisted_ip && dns_info.blacklisted_ips.length > 0) {
+          placement.action = 'EXCLUDE';
+          // Format only the blacklisted IPs with line breaks if multiple
+          const ip_list = dns_info.blacklisted_ips.length > 1 
+            ? dns_info.blacklisted_ips.join('\n')
+            : dns_info.blacklisted_ips[0];
+          
+          // Get the first IP blocklist URL for reference
+          const reference_url = CONFIG.IP_BLOCKLIST[0];
+          const list_name = extractListName(reference_url);
+          
+          placement.reason = `blacklisted IP:\n${ip_list}; reported in ${list_name}`;
+          placement.reference_list = createHyperlink(reference_url, list_name);
+        }
+      } catch (error) {
+        console.warn(`DNS lookup failed for ${domain}:`, error);
+      }
+    });
+    
+    // Rate limiting
+    if (index < batches.length - 1) {
+      Utilities.sleep(1000);
+    }
+  });
+}
+
+/**
+ * Get current date and time in EST
+ */
+function get_current_est_datetime() {
+  const now = new Date();
+  const est_offset = -5; // EST is UTC-5
+  const est_time = new Date(now.getTime() + (est_offset * 60 * 60 * 1000));
+  
+  return est_time.toLocaleString('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+}
+
+/**
+ * Output results to Google Sheet with summary info
+ */
+function output_results(placements, timings, start_time) {
+  console.log('Outputting results...');
+  
+  if (!CONFIG.SHEET_URL || CONFIG.SHEET_URL === 'YOUR_SHEET_URL_HERE') {
+    console.error('Sheet URL not configured - please update CONFIG.SHEET_URL');
+    return;
+  }
+  
+  try {
+    const spreadsheet = SpreadsheetApp.openByUrl(CONFIG.SHEET_URL);
+    
+    // Create or get main analysis sheet
+    let analysis_sheet = spreadsheet.getSheetByName('Analysis');
+    if (!analysis_sheet) {
+      analysis_sheet = spreadsheet.insertSheet('Analysis');
+    }
+    
+    // Create or get raw data sheet (hidden)
+    let raw_sheet = spreadsheet.getSheetByName('gaql_output');
+    if (!raw_sheet) {
+      raw_sheet = spreadsheet.insertSheet('gaql_output');
+      raw_sheet.hideSheet();
+    }
+    
+    // Output raw data to gaql_output sheet
+    output_raw_data(raw_sheet, placements);
+    
+    // Output analysis to main sheet
+    output_analysis_data(analysis_sheet, placements, timings, start_time);
+    
+  } catch (error) {
+    console.error('Failed to output results:', error);
+    throw error;
+  }
+}
+
+/**
+ * Output raw GAQL data to hidden sheet
+ */
+function output_raw_data(sheet, placements) {
+  sheet.clear();
+  
+  const headers = [
+    'Target URL',
+    'Placement',
+    'Display Name',
+    'Placement Type',
+    'Resource Name',
+    'Campaign ID',
+    'Impressions',
+    'Customer ID',
+    'Customer Name',
+    'Page Rank',
+    'Domain Rank',
+    'OPR Status'
+  ];
+  
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  
+  const data = placements.map(placement => [
+    placement.target_url,
+    placement.placement,
+    placement.display_name,
+    placement.placement_type,
+    placement.resource_name,
+    placement.campaign_id,
+    placement.impressions,
+    placement.customer_id,
+    placement.customer_name,
+    placement.page_rank || '',
+    placement.domain_rank || '',
+    placement.opr_status || ''
+  ]);
+  
+  if (data.length > 0) {
+    sheet.getRange(2, 1, data.length, headers.length).setValues(data);
+  }
+  
+  sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+  sheet.autoResizeColumns(1, headers.length);
+}
+
+/**
+ * Output analysis data with improved formatting
+ */
+function output_analysis_data(sheet, placements, timings, start_time) {
+  sheet.clear();
+  
+  const total_time = new Date() - start_time;
+  const excluded_count = get_excluded_count(placements);
+  const keep_count = get_keep_count(placements);
+  const current_datetime = get_current_est_datetime();
+  const dateRange = getDateRange(CONFIG.DATES_BACK);
+  
+  // Get unique customer info
+  const unique_customers = [...new Set(placements.map(p => `${p.customer_name} - ${p.customer_id}`))];
+  const customer_display = unique_customers.length > 0 ? unique_customers.join(', ') : 'No accounts found';
+  
+  // Summary header - all in column A, rows 1-7
+  const summary_data = [
+    [`Account: ${customer_display}`],
+    [`Script Last Refresh: ${current_datetime}`],
+    [`Script Total Runtime: ${(total_time / 1000).toFixed(2)} seconds`],
+    [`Date Range: ${dateRange.startDate} to ${dateRange.endDate}`],
+    [`Total PMAX Placements: ${placements.length} | Recommended Exclusions: ${excluded_count} | Whitelisted: ${keep_count}`],
+    [`Blacklist Stats: ${spam_keywords.length} keywords, ${blacklisted_domains.size} domains, ${suspicious_tlds.size} TLDs`],
+    [`Open Page Rank: ${domain_page_ranks.size} domains analyzed | API Status: ${CONFIG.OPR_ENABLED ? 'Enabled' : 'Disabled'}`]
+  ];
+  
+  // Write summary to column A, rows 1-7
+  summary_data.forEach((row, index) => {
+    sheet.getRange(index + 1, 1, 1, 1).setValue(row[0]);
+  });
+  
+  // Format summary rows with specific styling
+  sheet.getRange(1, 1, 1, 1).setFontWeight('bold'); // Row 1: Bold
+  sheet.getRange(2, 1, 4, 1).setFontStyle('italic'); // Rows 2-5: Italic
+  
+  // Data headers starting after summary (row 9)
+  const header_row = 9;
+  const headers = [
+    'Campaign ID',
+    'Placement Type',
+    'Placement',
+    'Impr.',
+    'Display Name',
+    'Action',
+    'Reason',
+    'Reference List',
+    'Page Rank',
+    'Domain Rank'
+  ];
+  
+  sheet.getRange(header_row, 1, 1, headers.length).setValues([headers]);
+  
+  // Format headers with grey background and text wrap
+  const header_range = sheet.getRange(header_row, 1, 1, headers.length);
+  header_range.setFontWeight('bold');
+  header_range.setBackground('#d9d9d9');
+  header_range.setWrap(true);
+  
+  // Data rows - WITH OPEN PAGE RANK DATA
+  if (placements.length > 0) {
+    const data = placements.map(placement => [
+      placement.campaign_id || '',
+      placement.placement_type || '',
+      placement.target_url || '',
+      placement.impressions || 0,
+      placement.display_name || '',
+      placement.action || 'NEUTRAL',
+      placement.reason || '',
+      placement.reference_list || '',
+      placement.page_rank || '',
+      placement.domain_rank || ''
+    ]);
+    
+    sheet.getRange(header_row + 1, 1, data.length, headers.length).setValues(data);
+    
+    // Add conditional formatting for EXCLUDE rows (Action is column 6)
+    const action_range = sheet.getRange(header_row + 1, 6, data.length, 1);
+    const exclude_rule = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo('EXCLUDE')
+      .setBackground('#ffcccc')
+      .setRanges([action_range])
+      .build();
+    
+    // Add conditional formatting for KEEP rows
+    const keep_rule = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo('KEEP')
+      .setBackground('#ccffcc')
+      .setRanges([action_range])
+      .build();
+    
+    const rules = sheet.getConditionalFormatRules();
+    rules.push(exclude_rule);
+    rules.push(keep_rule);
+    sheet.setConditionalFormatRules(rules);
+    
+    // Enable text wrapping for the Reason column (column 7)
+    const reason_range = sheet.getRange(header_row + 1, 7, data.length, 1);
+    reason_range.setWrap(true);
+    
+    // Set specific column widths
+    sheet.setColumnWidth(7, 300); // Make Reason column wider (300 pixels)
+    sheet.setColumnWidth(8, 200); // Set Reference List column width (200 pixels)
+    sheet.setColumnWidth(2, 120); // Set Placement Type column width (120 pixels)
+    sheet.setColumnWidth(4, 80);  // Set Impr. column width (80 pixels)
+    sheet.setColumnWidth(9, 80);  // Set Page Rank column width (80 pixels)
+    sheet.setColumnWidth(10, 100); // Set Domain Rank column width (100 pixels)
+  }
+  
+  // Auto-resize most columns but preserve custom widths for specific columns
+  for (let i = 1; i <= headers.length; i++) {
+    if (![2, 4, 7, 8, 9, 10].includes(i)) {
+      sheet.autoResizeColumn(i);
+    }
+  }
+  
+  console.log(`Output ${placements.length} rows to analysis sheet`);
+}
+
+/**
+ * Utility functions
+ */
+function time_function(func) {
+  const start = new Date();
+  const result = func();
+  return new Date() - start;
+}
+
+function escape_regex(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function log_summary(timings, total_placements, start_time) {
+  const total_time = new Date() - start_time;
+  const excluded_count = get_excluded_count([]);
+  
+  console.log('\n=== EXECUTION SUMMARY ===');
+  console.log(`Total execution time: ${(total_time / 1000).toFixed(2)}s`);
+  console.log(`Blacklist fetch: ${(timings.blacklist_fetch / 1000).toFixed(2)}s`);
+  console.log(`PMAX fetch: ${(timings.pmax_fetch / 1000).toFixed(2)}s`);
+  console.log(`Analysis: ${(timings.analysis / 1000).toFixed(2)}s`);
+  console.log(`Output: ${(timings.output / 1000).toFixed(2)}s`);
+  console.log(`Total placements analyzed: ${total_placements}`);
+  console.log(`Placements flagged for exclusion: ${excluded_count}`);
+  console.log('========================\n');
+}
+
+/**
+ * Helper function to get excluded placements count
+ */
+function get_excluded_count(placements) {
+  return placements.filter(p => p.action === 'EXCLUDE').length;
+}
+
+/**
+ * Helper function to get whitelisted placements count
+ */
+function get_keep_count(placements) {
+  return placements.filter(p => p.action === 'KEEP').length;
+}
+
+/**
+ * Test function for development
+ */
+function test_script() {
+  console.log('Running test with sample data...');
+  
+  // Test domain extraction
+  console.log('Testing domain extraction...');
+  console.log(extract_domain('https://www.example.com/path?query=1'));
+  
+  // Test keyword matching
+  console.log('Testing keyword matching...');
+  console.log('infantslab.com with "infant":', isValidKeywordMatch('infantslab.com', 'infant', 0));
+  console.log('infantslab.com with "ants":', isValidKeywordMatch('infantslab.com', 'ants', 3));
+  console.log('indianexpress.com with "dia":', isValidKeywordMatch('indianexpress.com', 'dia', 2));
+  console.log('test-domain.com with "domain":', isValidKeywordMatch('test-domain.com', 'domain', 5));
+  
+  // Test auto-exclude placement types
+  console.log('Testing auto-exclude placement types...');
+  const test_placement = { placement_type: 'YOUTUBE_VIDEO', action: 'NEUTRAL', reason: '', reference_list: '' };
+  console.log('YouTube video should be excluded:', check_auto_exclude_placement_type(test_placement));
+  
+  // Test TLD extraction and filtering
+  console.log('Testing TLD extraction and filtering...');
+  console.log('Should extract tk:', extractTld('.tk'));
+  console.log('Should extract com:', extractTld('.com'));
+  console.log('Should filter com:', CONFIG.FILTER_OUT_TLDS.includes('com'));
+  console.log('Should not filter tk:', CONFIG.FILTER_OUT_TLDS.includes('tk'));
+  
+  // Test list name extraction
+  console.log('Testing list name extraction...');
+  console.log('Extract from cbuijs URL:', extractListName('https://raw.githubusercontent.com/cbuijs/accomplist/main/suspicious-tlds/plain.black.tld.list'));
+  console.log('Extract from J-Gute URL:', extractListName('https://raw.githubusercontent.com/J-Gute/pmax-words-to-exlcude/main/spam-and-irrelevant-terms'));
 }
