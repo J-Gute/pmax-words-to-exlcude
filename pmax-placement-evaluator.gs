@@ -32,6 +32,7 @@ const CONFIG = {
     'https://raw.githubusercontent.com/Levi2288/AdvancedBlockList/refs/heads/main/Lists/privacy.txt',
     'https://raw.githubusercontent.com/Levi2288/AdvancedBlockList/refs/heads/main/Lists/abuse.txt',
     'https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/domains/dga7.txt',
+    'https://raw.githubusercontent.com/hagezi/dns-blocklists/refs/heads/main/wildcard/fake-onlydomains.txt',
     'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/disw-mcc-exclusion-master-list',
   ],
   IP_BLOCKLIST: [
@@ -47,67 +48,218 @@ const CONFIG = {
     'https://raw.githubusercontent.com/ShadowWhisperer/IPs/master/Malware/Hosting',
     'https://raw.githubusercontent.com/sefinek/Malicious-IP-Addresses/main/lists/main.txt'
   ],
-  
-  // Output configuration - REPLACE WITH YOUR SHEET URL
-  SHEET_URL: 'URL here',
-  DATES_BACK: 7,
+  SHEET_URL: 'https://docs.google.com/spreadsheets/d/1rs9iktuy8uMxpnT75ddUyGKpyZib4552nOY-3yAvtJc/edit?gid=67462327#gid=67462327',
+  DATES_BACK: 10,
   MIN_IMPRESSIONS: 2,
   DNS_BATCH_SIZE: 25,
   MAX_RETRIES: 3,
-  
-  // Analysis configuration
-  SHORT_TERM_LENGTH: 6, 
-  WORD_BOUNDARY_CHARS: ['.', '-', '_', '/', '?', '&', '=', '+'], 
-  
-  // Auto-exclude placement types
+  SHORT_TERM_LENGTH: 6,
+  WORD_BOUNDARY_CHARS: ['.', '-', '_', '/', '?', '&', '=', '+'],
   AUTO_EXCLUDE_TYPES: ['YOUTUBE_VIDEO', 'MOBILE_APPLICATION'],
-  
-  // TLDs to filter out from suspicious lists (common legitimate TLDs)
   FILTER_OUT_TLDS: ['com', 'org', 'edu', 'de', 'uk', 'fr', 'jp', 'kr', 'us', 'es', 'ch', 'ir', 'pl'],
-  
-  OPR_API_KEY: 'API key here',
-  OPR_BATCH_SIZE: 100, 
+  OPR_API_KEY: '8w4go4ssos4o0skg8ok80w44o80gcgccowwcwsk8',
+  OPR_BATCH_SIZE: 100,
   OPR_ENABLED: true,
 };
 
 // Global variables for blacklists with source tracking
-let blacklisted_domains = new Map(); 
+let blacklisted_domains = new Map();
 let whitelisted_domains = new Set();
-let suspicious_tlds = new Map(); 
+let suspicious_tlds = new Map();
 let spam_keywords = [];
-let blacklisted_ips = new Map(); // UPDATED: Now Map for source tracking
-let domain_page_ranks = new Map(); 
+let blacklisted_ips = new Map();
+let domain_page_ranks = new Map();
 
 /**
- * Extract list name from URL for reference
+ * Enhanced dynamic list name extraction with intelligent naming based on repo and category
  */
 function extractListName(url) {
   try {
     const cleanUrl = String(url).trim();
     
-    if (cleanUrl.includes('raw.githubusercontent.com')) {
-      const urlParts = cleanUrl.split('/');
-      
-      const mainIndex = urlParts.indexOf('main');
-      
-      if (mainIndex !== -1 && mainIndex < urlParts.length - 1) {
-        const listName = urlParts[mainIndex + 1];
-        return listName;
-      }
-      
-      if (cleanUrl.includes('/malicious-ip/')) {
-        return 'malicious-ip';
-      }
-      
-      const filename = urlParts[urlParts.length - 1];
-      return filename;
+    // Handle non-GitHub URLs
+    if (!cleanUrl.includes('raw.githubusercontent.com') && !cleanUrl.includes('jsdelivr.net')) {
+      return cleanUrl;
     }
     
-    return cleanUrl;
+    // Handle jsdelivr URLs
+    if (cleanUrl.includes('jsdelivr.net')) {
+      const jsdelivr_match = cleanUrl.match(/cdn\.jsdelivr\.net\/gh\/([^\/]+)\/([^@\/]+)@?[^\/]*\/(.+)/);
+      if (jsdelivr_match) {
+        const [, owner, repo, path] = jsdelivr_match;
+        const category = path.split('/')[0] || 'unknown';
+        const filename = path.split('/').pop() || 'unknown';
+        return generateDynamicName(owner, repo, category, filename, 'jsdelivr');
+      }
+    }
+    
+    // Handle GitHub URLs
+    const urlParts = cleanUrl.split('/');
+    if (urlParts.length < 6) return cleanUrl;
+    
+    const repo_owner = urlParts[3] || 'unknown';
+    const repo_name = urlParts[4] || 'unknown';
+    let category, filename;
+    
+    // Handle different GitHub URL patterns
+    if (cleanUrl.includes('/refs/heads/main/') || cleanUrl.includes('/refs/heads/master/')) {
+      // Pattern: /refs/heads/main/ or /refs/heads/master/
+      const pathStart = cleanUrl.includes('/refs/heads/main/') ?
+        cleanUrl.indexOf('/refs/heads/main/') + '/refs/heads/main/'.length :
+        cleanUrl.indexOf('/refs/heads/master/') + '/refs/heads/master/'.length;
+      const remainingPath = cleanUrl.substring(pathStart);
+      const pathParts = remainingPath.split('/');
+      category = pathParts[0] || 'unknown';
+      filename = pathParts[pathParts.length - 1] || 'unknown';
+    } else if (cleanUrl.includes('/master/') || cleanUrl.includes('/main/')) {
+      // Pattern: /master/ or /main/ (without refs/heads)
+      const branchIndex = cleanUrl.includes('/master/') ? 
+        cleanUrl.indexOf('/master/') + '/master/'.length :
+        cleanUrl.indexOf('/main/') + '/main/'.length;
+      const remainingPath = cleanUrl.substring(branchIndex);
+      const pathParts = remainingPath.split('/');
+      category = pathParts[0] || 'unknown';
+      filename = pathParts[pathParts.length - 1] || 'unknown';
+    } else {
+      // Fallback pattern matching
+      const mainIndex = urlParts.findIndex(part => part === 'main' || part === 'master');
+      if (mainIndex !== -1 && mainIndex < urlParts.length - 1) {
+        category = urlParts[mainIndex + 1] || 'unknown';
+        filename = urlParts[urlParts.length - 1] || 'unknown';
+      } else {
+        // Last resort - use last two parts
+        category = urlParts[urlParts.length - 2] || 'unknown';
+        filename = urlParts[urlParts.length - 1] || 'unknown';
+      }
+    }
+    
+    return generateDynamicName(repo_owner, repo_name, category, filename, 'github');
   } catch (error) {
     console.warn('Error extracting list name from URL:', url, error);
-    return String(url);
+    // Return a simplified name instead of the full URL
+    try {
+      const urlParts = String(url).split('/');
+      if (urlParts.length >= 5) {
+        const owner = urlParts[3] || 'unknown';
+        const repo = urlParts[4] || 'unknown';
+        return `${capitalizeFirst(owner)} ${capitalizeFirst(repo)}`;
+      }
+    } catch (fallbackError) {
+      // Final fallback
+      return 'Unknown Source';
+    }
+    return 'Unknown Source';
   }
+}
+
+/**
+ * Generate dynamic names based on repository patterns and content analysis
+ */
+function generateDynamicName(owner, repo, category, filename, platform) {
+  const normalizedOwner = owner.toLowerCase();
+  const normalizedRepo = repo.toLowerCase();
+  const normalizedCategory = category.toLowerCase();
+  const normalizedFilename = filename.toLowerCase();
+  const ownerPatterns = {
+    'cbuijs': 'Accomplist',
+    'j-gute': 'di sw',
+    'levi2288': 'AdvancedBlockList',
+    'romainmarcoux': 'Marcoux Security',
+    'stamparm': 'IPsum',
+    'shadowwhisperer': 'ShadowWhisperer',
+    'sefinek': 'Sefinek Security',
+    '2004gixxer600': 'Gixxer BlockLists',
+    'hagezi': 'HaGeZi'
+  };
+  const categoryPatterns = {
+    'easylist': 'EasyList Domains',
+    'malicious-dom': 'Malicious Domains',
+    'typosquat': 'Typosquatting Domains',
+    'adult-themed': 'Adult Content Domains',
+    'crypto': 'Crypto Scam Domains',
+    'gambling': 'Gambling Domains',
+    'games': 'Gaming Domains',
+    'streaming': 'Streaming Domains',
+    'chris': 'Investigation Domains',
+    'warez': 'Warez Domains',
+    'suspicious-tlds': 'Suspicious TLDs',
+    'abuse-tlds': 'Abuse TLDs',
+    'domains': 'Domain Blocklist',
+    'lists': 'Security Lists',
+    'malicious-ip': 'Malicious IPs',
+    'bogons': 'Bogon IPs',
+    'levels': 'Threat Intelligence IPs',
+    'malware': 'Malware Hosting IPs',
+    'spam-and-irrelevant-terms': 'Spam Keywords',
+    'fake-onlydomains' : 'Likely Fake/Scam Domains',
+    'whitelisted-domains': 'Whitelisted Domains',
+    'disw-mcc-exclusion-master-list': 'Custom MCC Exclusion List'
+  };
+  const filenamePatterns = {
+    'adlist': 'Ad Domains',
+    'spam': 'Spam Domains',
+    'privacy': 'Privacy Violating Domains',
+    'abuse': 'Abuse Domains',
+    'dga7': 'DGA Domains',
+    'main': 'Main List',
+    'hosting': 'Hosting IPs',
+    'levels': 'Threat Level IPs'
+  };
+  const geoPatterns = {
+    'brazil': 'Brazil',
+    'china': 'China',
+    'japan': 'Japan'
+  };
+  let baseName = ownerPatterns[normalizedOwner] || capitalizeFirst(owner);
+  let geoContext = '';
+  Object.keys(geoPatterns).forEach(geo => {
+    if (normalizedCategory.includes(geo) || normalizedFilename.includes(geo)) {
+      geoContext = ` ${geoPatterns[geo]}`;
+    }
+  });
+  let contentType = '';
+  if (categoryPatterns[normalizedCategory]) {
+    contentType = categoryPatterns[normalizedCategory];
+  } else if (filenamePatterns[normalizedFilename.split('.')[0]]) {
+    contentType = filenamePatterns[normalizedFilename.split('.')[0]];
+  } else if (normalizedCategory.includes('ip') || normalizedFilename.includes('ip')) {
+    if (normalizedCategory.includes('malicious') || normalizedFilename.includes('malicious')) {
+      contentType = 'Malicious IPs';
+    } else {
+      contentType = 'IP Blocklist';
+    }
+  } else if (normalizedCategory.includes('domain') || normalizedFilename.includes('domain')) {
+    if (normalizedCategory.includes('malicious') || normalizedFilename.includes('malicious')) {
+      contentType = 'Malicious Domains';
+    } else {
+      contentType = 'Domain Blocklist';
+    }
+  } else if (normalizedCategory.includes('tld') || normalizedFilename.includes('tld')) {
+    contentType = 'TLD Blocklist';
+  } else {
+    contentType = capitalizeFirst(category.replace(/[-_]/g, ' '));
+  }
+  if (normalizedFilename.includes('level-')) {
+    const levelMatch = normalizedFilename.match(/level-(\d+)/);
+    if (levelMatch) {
+      contentType += ` (Level ${levelMatch[1]})`;
+    }
+  }
+  if (normalizedFilename.includes('cidr')) {
+    contentType += ' (CIDR)';
+  }
+  if (normalizedFilename.includes('ip4')) {
+    contentType += ' (IPv4)';
+  }
+  const fullName = `${baseName}${geoContext} ${contentType}`;
+  return fullName.trim();
+}
+
+/**
+ * Capitalize first letter of a string
+ */
+function capitalizeFirst(str) {
+  return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
 /**
@@ -123,38 +275,19 @@ function createHyperlink(url, text) {
 function main() {
   const start_time = new Date();
   console.log('Starting PMAX Placement Analysis...');
-  
   const timings = {};
-  
   try {
-    // Step 1: Fetch blacklists
     timings.blacklist_fetch = time_function(() => fetch_all_blacklists());
-    
-    // NEW: Validate IP matching functionality
     validate_ip_matching();
-    
-    // Step 2: Fetch PMAX placements
     timings.pmax_fetch = time_function(() => {
       return fetch_pmax_placements();
     });
-    
     const placements = fetch_pmax_placements();
-    
-    // Step 3-8: Analyze placements
     timings.analysis = time_function(() => analyze_placements(placements));
-    
-    // NEW Step 9: Fetch Open Page Rank data
     timings.opr_fetch = time_function(() => fetch_open_page_rank_data(placements));
-    
-    // NEW Step 10: Apply Open Page Rank data
     timings.opr_apply = time_function(() => apply_open_page_rank_data(placements));
-    
-    // Step 11: Output results (previously step 9)
     timings.output = time_function(() => output_results(placements, timings, start_time));
-    
-    // Log summary
     log_summary(timings, placements.length, start_time);
-    
   } catch (error) {
     console.error('Script execution failed:', error);
     throw error;
@@ -166,45 +299,39 @@ function main() {
  */
 function load_ip_blocklists() {
   console.log('Fetching IP blocklists...');
-  const ips = new Map(); // ip -> source_url
+  const ips = new Map();
   let total_loaded = 0;
-  
   CONFIG.IP_BLOCKLIST.forEach((url, index) => {
     try {
-      console.log(`Loading IP list ${index + 1}/${CONFIG.IP_BLOCKLIST.length} from: ${extractListName(url)}`);
+      const listName = extractListName(url);
+      console.log(`Loading IP list ${index + 1}/${CONFIG.IP_BLOCKLIST.length} from: ${listName}`);
       const response = fetchWithTimeout(url);
-      
       if (response && response.getResponseCode() === 200) {
         let count = 0;
-        
         response.getContentText().split('\n').forEach(line => {
           const trimmed = line.trim();
           if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('//')) {
-            // Extract IP from various formats
             let ip = trimmed;
-            
-            // Handle different formats:
-            // - "1.2.3.4/32" (CIDR)
-            // - "1.2.3.4 # comment" (IP with comment)
-            // - "1.2.3.4	malware" (IP with tab-separated info)
             if (ip.includes(' ')) {
               ip = ip.split(' ')[0];
             }
             if (ip.includes('\t')) {
               ip = ip.split('\t')[0];
             }
-            
-            // Validate IP format (basic check for IPv4)
             if (ip.match(/^\d+\.\d+\.\d+\.\d+(\/\d+)?$/)) {
               if (!ips.has(ip)) {
-                ips.set(ip, url);
+                ips.set(ip, [url]);
                 count++;
+              } else {
+                const sources = ips.get(ip);
+                if (!sources.includes(url)) {
+                  sources.push(url);
+                }
               }
             }
           }
         });
-        
-        console.log(`  Loaded ${count} IPs from ${extractListName(url)}`);
+        console.log(`  Loaded ${count} IPs from ${listName}`);
         total_loaded += count;
       } else {
         throw new Error(`HTTP ${response ? response.getResponseCode() : 'unknown'}`);
@@ -213,9 +340,30 @@ function load_ip_blocklists() {
       console.warn(`Failed to load IP list from ${url}:`, error);
     }
   });
-  
   console.log(`Total unique blacklisted IPs loaded: ${ips.size} (${total_loaded} total entries processed)`);
   return ips;
+}
+
+/**
+ * Get all blacklist sources for a specific IP
+ */
+function get_ip_blacklist_sources(ip) {
+  const sources = [];
+  if (blacklisted_ips.has(ip)) {
+    sources.push(...blacklisted_ips.get(ip));
+  }
+  const exact_match = `${ip}/32`;
+  if (blacklisted_ips.has(exact_match)) {
+    sources.push(...blacklisted_ips.get(exact_match));
+  }
+  for (const [blocked_cidr, cidr_sources] of blacklisted_ips) {
+    if (blocked_cidr.includes('/') && is_ip_in_cidr(ip, blocked_cidr)) {
+      sources.push(...cidr_sources);
+    } else if (!blocked_cidr.includes('/') && blocked_cidr === ip) {
+      sources.push(...cidr_sources);
+    }
+  }
+  return [...new Set(sources)];
 }
 
 /**
@@ -223,70 +371,54 @@ function load_ip_blocklists() {
  */
 function validate_ip_matching() {
   console.log('Validating IP matching with sample data...');
-  
   const sample_tests = [
-    '1.0.170.118',  // Should match exact IP
-    '1.10.16.5',    // Should match /20 range
-    '1.19.100.1',   // Should match /16 range
-    '8.8.8.8',      // Should NOT match (Google DNS)
-    '1.1.1.1'       // Should NOT match (Cloudflare DNS)
+    '1.0.170.118',
+    '1.10.16.5',
+    '1.19.100.1',
+    '8.8.8.8',
+    '1.1.1.1'
   ];
-  
   let matches = 0;
   sample_tests.forEach(ip => {
     const is_blocked = is_ip_blacklisted(ip);
     if (is_blocked) {
       matches++;
-      // Try to find which list blocked this IP
-      let source = 'unknown';
-      if (blacklisted_ips.has(ip)) {
-        source = extractListName(blacklisted_ips.get(ip));
-      } else if (blacklisted_ips.has(`${ip}/32`)) {
-        source = extractListName(blacklisted_ips.get(`${ip}/32`));
-      }
-      console.log(`IP ${ip}: BLOCKED (from ${source})`);
+      const sources = get_ip_blacklist_sources(ip);
+      const source_names = sources.map(source => extractListName(source));
+      console.log(`IP ${ip}: BLOCKED (from ${source_names.join(', ')})`);
     } else {
       console.log(`IP ${ip}: ALLOWED`);
     }
   });
-  
   console.log(`IP validation complete: ${matches}/${sample_tests.length} test IPs were blocked`);
   console.log(`Total IP entries in blacklist: ${blacklisted_ips.size}`);
 }
 
 /**
- * Check if IP is blacklisted - UPDATED FOR MAP
+ * Check if IP is blacklisted - UPDATED FOR ARRAY SOURCES
  */
 function is_ip_blacklisted(ip) {
   if (!ip || typeof ip !== 'string') {
     return false;
   }
-  
-  // Direct IP match (exact match)
   if (blacklisted_ips.has(ip)) {
     return true;
   }
-  
-  // Check for /32 notation match
   const exact_match = `${ip}/32`;
   if (blacklisted_ips.has(exact_match)) {
     return true;
   }
-  
-  // Check against all CIDR ranges in blacklist
-  for (const [blocked_cidr, source] of blacklisted_ips) {
+  for (const [blocked_cidr, sources] of blacklisted_ips) {
     if (blocked_cidr.includes('/')) {
       if (is_ip_in_cidr(ip, blocked_cidr)) {
         return true;
       }
     } else {
-      // Handle entries without CIDR notation (treat as exact match)
       if (blocked_cidr === ip) {
         return true;
       }
     }
   }
-  
   return false;
 }
 
@@ -296,42 +428,26 @@ function is_ip_blacklisted(ip) {
 function is_ip_in_cidr(ip, cidr) {
   try {
     if (!cidr.includes('/')) {
-      // If no CIDR notation, treat as exact match
       return ip === cidr;
     }
-    
     const [network, prefix_length] = cidr.split('/');
     const prefix = parseInt(prefix_length);
-    
-    // Validate inputs
     if (isNaN(prefix) || prefix < 0 || prefix > 32) {
       return false;
     }
-    
-    // Convert IP addresses to integers
     const ip_parts = ip.split('.').map(Number);
     const network_parts = network.split('.').map(Number);
-    
-    // Validate IP format
     if (ip_parts.length !== 4 || network_parts.length !== 4) {
       return false;
     }
-    
     if (ip_parts.some(part => isNaN(part) || part < 0 || part > 255) ||
         network_parts.some(part => isNaN(part) || part < 0 || part > 255)) {
       return false;
     }
-    
-    // Convert to 32-bit integers
     const ip_int = (ip_parts[0] << 24) + (ip_parts[1] << 16) + (ip_parts[2] << 8) + ip_parts[3];
     const network_int = (network_parts[0] << 24) + (network_parts[1] << 16) + (network_parts[2] << 8) + network_parts[3];
-    
-    // Create subnet mask
     const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
-    
-    // Check if IP is in the network
     return (ip_int & mask) === (network_int & mask);
-    
   } catch (error) {
     console.warn(`Error checking CIDR ${cidr} for IP ${ip}:`, error);
     return false;
@@ -345,7 +461,6 @@ function getDateRange(daysBack) {
   const endDate = new Date();
   const startDate = new Date();
   startDate.setDate(startDate.getDate() - daysBack);
-  
   return {
     startDate: formatDate(startDate),
     endDate: formatDate(endDate)
@@ -388,10 +503,8 @@ function loadSpamKeywords() {
   try {
     console.log('Fetching spam keywords...');
     const response = fetchWithTimeout(CONFIG.SPAM_KEYWORDS);
-
     if (response && response.getResponseCode() === 200) {
       const keywords_set = new Set();
-      
       response.getContentText()
         .split('\n')
         .forEach(line => {
@@ -400,7 +513,6 @@ function loadSpamKeywords() {
             keywords_set.add(keyword);
           }
         });
-      
       const keywords = Array.from(keywords_set);
       console.log(`Loaded ${keywords.length} unique spam keywords`);
       return keywords;
@@ -420,10 +532,8 @@ function loadWhitelistDomains() {
   try {
     console.log('Fetching whitelist domains...');
     const response = fetchWithTimeout(CONFIG.WHITELIST_DOMAINS);
-
     if (response && response.getResponseCode() === 200) {
       const domains = new Set();
-      
       response.getContentText()
         .split('\n')
         .forEach(line => {
@@ -432,7 +542,6 @@ function loadWhitelistDomains() {
             domains.add(domain);
           }
         });
-      
       console.log(`Loaded ${domains.size} unique whitelist domains`);
       return domains;
     } else {
@@ -449,21 +558,15 @@ function loadWhitelistDomains() {
  */
 function extractTld(line) {
   const tld = line.trim().toLowerCase();
-  
   if (!tld || tld.startsWith('#') || tld.startsWith('//')) {
     return null;
   }
-  
-  // Expecting format: .tld (e.g., .com, .tk, .0, .537z)
   if (tld.startsWith('.')) {
-    const extracted_tld = tld.substring(1); // Remove the leading dot
-    
-    // Validate TLD (must be 1+ characters)
+    const extracted_tld = tld.substring(1);
     if (extracted_tld.length >= 1) {
       return extracted_tld;
     }
   }
-  
   return null;
 }
 
@@ -471,38 +574,39 @@ function extractTld(line) {
  * Load suspicious TLDs from multiple sources with deduplication and source tracking
  */
 function loadSuspiciousTlds() {
-  const tlds = new Map(); // tld -> source_url
+  const tlds = new Map();
   let total_loaded = 0;
   let filtered_count = 0;
-  
   CONFIG.SUSPICIOUS_TLDS.forEach((url, index) => {
     try {
-      console.log(`Fetching suspicious TLD list ${index + 1}/${CONFIG.SUSPICIOUS_TLDS.length}...`);
+      const listName = extractListName(url);
+      console.log(`Fetching suspicious TLD list ${index + 1}/${CONFIG.SUSPICIOUS_TLDS.length} from: ${listName}`);
       const response = fetchWithTimeout(url);
-
       if (response && response.getResponseCode() === 200) {
         let tlds_added = 0;
         let tlds_filtered = 0;
-        
         response.getContentText()
           .split('\n')
           .forEach(line => {
             const extracted_tld = extractTld(line);
             if (extracted_tld) {
-              // Filter out specific legitimate TLDs
               if (CONFIG.FILTER_OUT_TLDS.includes(extracted_tld)) {
                 tlds_filtered++;
                 filtered_count++;
               } else {
                 if (!tlds.has(extracted_tld)) {
-                  tlds.set(extracted_tld, url);
+                  tlds.set(extracted_tld, [url]);
                   tlds_added++;
+                } else {
+                  const sources = tlds.get(extracted_tld);
+                  if (!sources.includes(url)) {
+                    sources.push(url);
+                  }
                 }
               }
             }
           });
-        
-        console.log(`Loaded ${tlds_added} unique TLDs from list ${index + 1} (filtered out ${tlds_filtered} legitimate TLDs)`);
+        console.log(`Loaded ${tlds_added} unique TLDs from ${listName} (filtered out ${tlds_filtered} legitimate TLDs)`);
         total_loaded += tlds_added;
       } else {
         throw new Error(`HTTP ${response ? response.getResponseCode() : 'unknown'}`);
@@ -511,18 +615,15 @@ function loadSuspiciousTlds() {
       console.warn(`Failed to load TLD list ${index + 1}: ${url}`, error);
     }
   });
-  
-  // Add fallback TLDs if no lists loaded successfully (excluding filtered ones)
   if (tlds.size === 0) {
     console.warn('No TLD lists loaded successfully, adding fallback suspicious TLDs');
     const fallback_tlds = ['tk', 'ml', 'ga', 'cf', 'top', 'click', 'download', 'zip', 'review', 'country', 'stream'];
     fallback_tlds.forEach(tld => {
       if (!CONFIG.FILTER_OUT_TLDS.includes(tld)) {
-        tlds.set(tld, 'fallback');
+        tlds.set(tld, ['fallback']);
       }
     });
   }
-  
   console.log(`Total unique suspicious TLDs loaded: ${tlds.size} (filtered out ${filtered_count} legitimate TLDs total)`);
   return tlds;
 }
@@ -531,44 +632,39 @@ function loadSuspiciousTlds() {
  * Load domain blocklists with deduplication and source tracking
  */
 function loadDomainBlocklists() {
-  const domains = new Map(); // domain -> source_url
-  
+  const domains = new Map();
   CONFIG.DOMAIN_BLOCKLIST.forEach((url, index) => {
     try {
-      console.log(`Fetching domain blocklist ${index + 1}/${CONFIG.DOMAIN_BLOCKLIST.length}...`);
+      const listName = extractListName(url);
+      console.log(`Fetching domain blocklist ${index + 1}/${CONFIG.DOMAIN_BLOCKLIST.length} from: ${listName}`);
       const response = fetchWithTimeout(url);
-
       if (response && response.getResponseCode() === 200) {
         let domains_added = 0;
-        
         response.getContentText()
           .split('\n')
           .forEach(line => {
             const trimmed = line.trim().toLowerCase();
             if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('//')) {
-              // Handle different formats (hosts file, adblock, plain domains)
               let domain = trimmed;
-              
-              // Remove hosts file format (0.0.0.0 domain.com or 127.0.0.1 domain.com)
               if (domain.includes(' ')) {
                 const parts = domain.split(' ');
                 domain = parts[parts.length - 1];
               }
-              
-              // Remove adblock format (||domain.com^)
               domain = domain.replace(/^\|\|/, '').replace(/\^.*$/, '');
-              
-              // Validate domain format
               if (domain.includes('.') && !domain.includes('/') && domain.length > 3) {
                 if (!domains.has(domain)) {
-                  domains.set(domain, url);
+                  domains.set(domain, [url]);
                   domains_added++;
+                } else {
+                  const sources = domains.get(domain);
+                  if (!sources.includes(url)) {
+                    sources.push(url);
+                  }
                 }
               }
             }
           });
-        
-        console.log(`Loaded ${domains_added} unique domains from blocklist ${index + 1}`);
+        console.log(`Loaded ${domains_added} unique domains from ${listName}`);
       } else {
         throw new Error(`HTTP ${response ? response.getResponseCode() : 'unknown'}`);
       }
@@ -576,7 +672,6 @@ function loadDomainBlocklists() {
       console.warn(`Failed to load blocklist ${index + 1}: ${url}`, error);
     }
   });
-  
   console.log(`Total unique domains loaded: ${domains.size}`);
   return domains;
 }
@@ -586,14 +681,11 @@ function loadDomainBlocklists() {
  */
 function fetch_all_blacklists() {
   console.log('Fetching blacklists...');
-  
-  // Load all blacklists with deduplication and source tracking
   spam_keywords = loadSpamKeywords();
   whitelisted_domains = loadWhitelistDomains();
   suspicious_tlds = loadSuspiciousTlds();
   blacklisted_domains = loadDomainBlocklists();
-  blacklisted_ips = load_ip_blocklists(); // UPDATED: Use new function
-  
+  blacklisted_ips = load_ip_blocklists();
   console.log('\n=== BLACKLIST SUMMARY ===');
   console.log(`Spam keywords: ${spam_keywords.length} unique entries`);
   console.log(`Whitelisted domains: ${whitelisted_domains.size} unique entries`);
@@ -608,12 +700,8 @@ function fetch_all_blacklists() {
  */
 function fetch_pmax_placements() {
   console.log('Fetching PMAX placements...');
-  
   try {
-    // Get date range
     const dateRange = getDateRange(CONFIG.DATES_BACK);
-
-    // Fetch placements
     const query = `
       SELECT campaign.id, performance_max_placement_view.display_name, 
              performance_max_placement_view.placement, performance_max_placement_view.placement_type, 
@@ -625,25 +713,17 @@ function fetch_pmax_placements() {
         AND performance_max_placement_view.placement_type NOT IN ('YOUTUBE_CHANNEL', 'YOUTUBE_VIDEO')
       ORDER BY metrics.impressions DESC
     `;
-    
     const placements = [];
-    
-    // Check if we're in MCC context
     if (typeof AdsManagerApp !== 'undefined') {
-      // MCC context - iterate through accounts
       const account_iterator = AdsManagerApp.accounts().get();
-      
       while (account_iterator.hasNext()) {
         const account = account_iterator.next();
-        
         try {
           AdsManagerApp.select(account);
           const report = AdsApp.report(query);
           const rows = report.rows();
-          
           while (rows.hasNext()) {
             const row = rows.next();
-            
             placements.push({
               target_url: row['performance_max_placement_view.target_url'],
               placement: row['performance_max_placement_view.placement'],
@@ -658,7 +738,6 @@ function fetch_pmax_placements() {
               action: 'NEUTRAL',
               reason: '',
               reference_list: '',
-              // NEW FIELDS for Open Page Rank
               page_rank: null,
               domain_rank: null,
               opr_status: null
@@ -669,14 +748,11 @@ function fetch_pmax_placements() {
         }
       }
     } else {
-      // Single account context
       try {
         const report = AdsApp.report(query);
         const rows = report.rows();
-        
         while (rows.hasNext()) {
           const row = rows.next();
-          
           placements.push({
             target_url: row['performance_max_placement_view.target_url'],
             placement: row['performance_max_placement_view.placement'],
@@ -684,7 +760,7 @@ function fetch_pmax_placements() {
             placement_type: row['performance_max_placement_view.placement_type'],
             resource_name: row['performance_max_placement_view.resource_name'],
             campaign_id: row['campaign.id'],
-            campaign_name: '', // Not available in this query structure
+            campaign_name: '',
             impressions: parseInt(row['metrics.impressions']),
             customer_id: AdsApp.currentAccount().getCustomerId(),
             customer_name: AdsApp.currentAccount().getName(),
@@ -698,10 +774,8 @@ function fetch_pmax_placements() {
         throw error;
       }
     }
-    
     console.log(`Fetched ${placements.length} placements`);
     return placements;
-    
   } catch (error) {
     console.error('Failed to fetch PMAX placements:', error);
     throw error;
@@ -716,10 +790,7 @@ function fetch_open_page_rank_data(placements) {
     console.log('Open Page Rank API disabled or not configured');
     return;
   }
-  
   console.log('Fetching Open Page Rank data...');
-  
-  // Extract unique domains from placements
   const unique_domains = new Set();
   placements.forEach(placement => {
     if (placement.target_url) {
@@ -729,22 +800,16 @@ function fetch_open_page_rank_data(placements) {
       }
     }
   });
-  
   const domains_array = Array.from(unique_domains);
   console.log(`Found ${domains_array.length} unique domains for OPR lookup`);
-  
-  // Process domains in batches
   const batches = [];
   for (let i = 0; i < domains_array.length; i += CONFIG.OPR_BATCH_SIZE) {
     batches.push(domains_array.slice(i, i + CONFIG.OPR_BATCH_SIZE));
   }
-  
   batches.forEach((batch, index) => {
     console.log(`Processing OPR batch ${index + 1}/${batches.length} (${batch.length} domains)`);
-    
     try {
       const opr_data = call_open_page_rank_api(batch);
-      
       if (opr_data && opr_data.response) {
         opr_data.response.forEach(domain_data => {
           domain_page_ranks.set(domain_data.domain, {
@@ -756,17 +821,13 @@ function fetch_open_page_rank_data(placements) {
           });
         });
       }
-      
-      // Rate limiting between batches
       if (index < batches.length - 1) {
-        Utilities.sleep(1000); // 1 second delay between batches
+        Utilities.sleep(1000);
       }
-      
     } catch (error) {
       console.warn(`Failed to fetch OPR data for batch ${index + 1}:`, error);
     }
   });
-  
   console.log(`Successfully fetched OPR data for ${domain_page_ranks.size} domains`);
 }
 
@@ -775,11 +836,8 @@ function fetch_open_page_rank_data(placements) {
  */
 function call_open_page_rank_api(domains) {
   const base_url = 'https://openpagerank.com/api/v1.0/getPageRank';
-  
-  // Build query parameters
   const query_params = domains.map(domain => `domains[]=${encodeURIComponent(domain)}`).join('&');
   const full_url = `${base_url}?${query_params}`;
-  
   try {
     const response = UrlFetchApp.fetch(full_url, {
       method: 'GET',
@@ -789,13 +847,11 @@ function call_open_page_rank_api(domains) {
       },
       muteHttpExceptions: true
     });
-    
     if (response.getResponseCode() === 200) {
       return JSON.parse(response.getContentText());
     } else {
       throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
     }
-    
   } catch (error) {
     console.error('Open Page Rank API call failed:', error);
     throw error;
@@ -810,15 +866,12 @@ function apply_open_page_rank_data(placements) {
     console.log('No Open Page Rank data available');
     return;
   }
-  
   console.log('Applying Open Page Rank data to placements...');
-  
   placements.forEach(placement => {
     if (placement.target_url) {
       const domain = extract_domain(placement.target_url);
       if (domain && domain_page_ranks.has(domain)) {
         const opr_data = domain_page_ranks.get(domain);
-        
         placement.page_rank = opr_data.page_rank_decimal;
         placement.domain_rank = opr_data.rank;
         placement.opr_status = opr_data.status_code === 200 ? 'Found' : 'Not Found';
@@ -832,30 +885,16 @@ function apply_open_page_rank_data(placements) {
  */
 function analyze_placements(placements) {
   console.log('Analyzing placements...');
-  
   placements.forEach(placement => {
-    // Step 3: Check placement type first (auto-exclude apps and YouTube)
     if (check_auto_exclude_placement_type(placement)) return;
-    
     if (!placement.target_url) return;
-    
     const domain = extract_domain(placement.target_url);
     if (!domain) return;
-    
-    // Step 4: Check if whitelisted (FIRST PRIORITY for domains)
     if (check_whitelisted_domain(domain, placement)) return;
-    
-    // Step 5: Check against blacklisted domains
     if (check_blacklisted_domain(domain, placement)) return;
-    
-    // Step 6: Check suspicious TLDs
     if (check_suspicious_tld(domain, placement)) return;
-    
-    // Step 7: Check spam keywords with improved matching
     if (check_spam_keywords_improved(domain, placement)) return;
   });
-  
-  // Step 8: DNS/IP checks (batched)
   if (blacklisted_ips.size > 0) {
     perform_dns_checks(placements.filter(p => p.action === 'NEUTRAL'));
   } else {
@@ -881,15 +920,9 @@ function check_auto_exclude_placement_type(placement) {
  */
 function extract_domain(url) {
   try {
-    // Remove protocol if present
     let domain = url.replace(/^https?:\/\//, '');
-    
-    // Remove path, query, and fragment
     domain = domain.split('/')[0].split('?')[0].split('#')[0];
-    
-    // Remove port if present
     domain = domain.split(':')[0];
-    
     return domain.toLowerCase();
   } catch (error) {
     console.warn(`Failed to extract domain from: ${url}`);
@@ -907,8 +940,6 @@ function check_whitelisted_domain(domain, placement) {
     placement.reference_list = '';
     return true;
   }
-  
-  // Check subdomains against whitelist
   const parts = domain.split('.');
   for (let i = 1; i < parts.length; i++) {
     const subdomain = parts.slice(i).join('.');
@@ -919,57 +950,52 @@ function check_whitelisted_domain(domain, placement) {
       return true;
     }
   }
-  
   return false;
 }
 
 /**
- * Check if domain is blacklisted
+ * Check if domain is blacklisted - UPDATED FOR MULTIPLE SOURCES
  */
 function check_blacklisted_domain(domain, placement) {
   if (blacklisted_domains.has(domain)) {
-    const source_url = blacklisted_domains.get(domain);
-    const list_name = extractListName(source_url);
+    const source_urls = blacklisted_domains.get(domain);
+    const source_names = source_urls.map(url => extractListName(url));
     placement.action = 'EXCLUDE';
-    placement.reason = `blacklisted domain; reported in ${list_name}`;
-    placement.reference_list = createHyperlink(source_url, list_name);
+    placement.reason = `blacklisted domain; reported in ${source_names.join(', ')}`;
+    placement.reference_list = '';
     return true;
   }
-  
-  // Check subdomains
   const parts = domain.split('.');
   for (let i = 1; i < parts.length; i++) {
     const subdomain = parts.slice(i).join('.');
     if (blacklisted_domains.has(subdomain)) {
-      const source_url = blacklisted_domains.get(subdomain);
-      const list_name = extractListName(source_url);
+      const source_urls = blacklisted_domains.get(subdomain);
+      const source_names = source_urls.map(url => extractListName(url));
       placement.action = 'EXCLUDE';
-      placement.reason = `blacklisted domain (parent); reported in ${list_name}`;
-      placement.reference_list = createHyperlink(source_url, list_name);
+      placement.reason = `blacklisted domain (parent); reported in ${source_names.join(', ')}`;
+      placement.reference_list = '';
       return true;
     }
   }
-  
   return false;
 }
 
 /**
- * Check if TLD is suspicious
+ * Check if TLD is suspicious - UPDATED FOR MULTIPLE SOURCES
  */
 function check_suspicious_tld(domain, placement) {
   const tld = domain.split('.').pop();
-  
   if (suspicious_tlds.has(tld)) {
-    const source_url = suspicious_tlds.get(tld);
-    const list_name = extractListName(source_url);
+    const source_urls = suspicious_tlds.get(tld);
+    const source_names = source_urls.map(url => extractListName(url));
     placement.action = 'EXCLUDE';
-    placement.reason = `suspicious TLD: ${tld}; reported in ${list_name}`;
-    placement.reference_list = createHyperlink(source_url, list_name);
+    placement.reason = `suspicious TLD: ${tld}; reported in ${source_names.join(', ')}`;
+    placement.reference_list = '';
     return true;
   }
-  
   return false;
 }
+
 
 /**
  * Check if a character is a word boundary
@@ -984,20 +1010,13 @@ function isWordBoundary(char) {
 function isValidKeywordMatch(domain, keyword, startIndex) {
   const keywordLength = keyword.length;
   const endIndex = startIndex + keywordLength;
-  
-  // For short keywords (<=6 chars), require word boundaries
   if (keywordLength <= CONFIG.SHORT_TERM_LENGTH) {
     const beforeChar = startIndex > 0 ? domain[startIndex - 1] : '';
     const afterChar = endIndex < domain.length ? domain[endIndex] : '';
-    
-    // Check if keyword is at word boundary (start/end of domain or separated by boundary chars)
     const atStart = startIndex === 0 || isWordBoundary(beforeChar);
     const atEnd = endIndex === domain.length || isWordBoundary(afterChar);
-    
     return atStart && atEnd;
   }
-  
-  // For longer keywords, allow substring matches
   return true;
 }
 
@@ -1006,46 +1025,34 @@ function isValidKeywordMatch(domain, keyword, startIndex) {
  */
 function check_spam_keywords_improved(domain, placement) {
   if (spam_keywords.length === 0) return false;
-  
   const found_terms = [];
   const normalized_domain = domain.toLowerCase();
-  
-  // Check each spam keyword
   spam_keywords.forEach(keyword => {
     const normalized_keyword = keyword.toLowerCase().trim();
-    
     if (normalized_keyword.length === 0) return;
-    
-    // Find all occurrences of the keyword in the domain
     let index = normalized_domain.indexOf(normalized_keyword);
     while (index !== -1) {
-      // Check if this match is valid based on word boundaries
       if (isValidKeywordMatch(normalized_domain, normalized_keyword, index)) {
         found_terms.push(keyword);
-        break; // Found valid match, no need to check more occurrences of this keyword
+        break;
       }
-      
-      // Look for next occurrence
       index = normalized_domain.indexOf(normalized_keyword, index + 1);
     }
   });
-  
-  // Remove duplicates
   const unique_terms = [...new Set(found_terms)];
-  
   if (unique_terms.length > 0) {
     const list_name = extractListName(CONFIG.SPAM_KEYWORDS);
     placement.action = 'EXCLUDE';
     placement.reason = `terms detected: ${unique_terms.join(', ')}; reported in ${list_name}`;
-    placement.reference_list = createHyperlink(CONFIG.SPAM_KEYWORDS, list_name);
+    placement.reference_list = '';
     return true;
   }
-  
   return false;
 }
 
+
 /**
- * Simplified DNS resolver class - UPDATED VERSION
+ * Simplified DNS resolver class
  */
 class SimpleDNSResolver {
   resolve_domain_ips(domain) {
@@ -1056,34 +1063,26 @@ class SimpleDNSResolver {
       blacklisted_ips: [],
       error: null
     };
-    
     try {
       const response = UrlFetchApp.fetch(`https://1.1.1.1/dns-query?name=${domain}&type=A`, {
         method: 'GET',
         headers: { 'Accept': 'application/dns-json' },
         muteHttpExceptions: true
       });
-      
       if (response.getResponseCode() === 200) {
         const dns_data = JSON.parse(response.getContentText());
-        
         if (dns_data.Status === 0 && dns_data.Answer) {
           dns_info.success = true;
-          
-          // Extract IP addresses from A records only
           dns_data.Answer
-            .filter(record => record.type === 1) // A records only
+            .filter(record => record.type === 1)
             .forEach(record => {
               const ip = record.data;
               dns_info.ip_addresses.push(ip);
-              
-              // Check if this IP is blacklisted
               if (is_ip_blacklisted(ip)) {
                 dns_info.is_blacklisted_ip = true;
                 dns_info.blacklisted_ips.push(ip);
               }
             });
-            
         } else {
           dns_info.error = `DNS query failed: Status ${dns_data.Status}`;
         }
@@ -1093,54 +1092,47 @@ class SimpleDNSResolver {
     } catch (error) {
       dns_info.error = error.message;
     }
-    
     return dns_info;
   }
 }
 
 /**
- * Perform DNS checks in batches - UPDATED VERSION
+ * Perform DNS checks in batches - UPDATED WITH MULTIPLE SOURCE TRACKING
  */
 function perform_dns_checks(placements) {
   console.log(`Performing DNS checks for ${placements.length} placements...`);
-  
   const dns_resolver = new SimpleDNSResolver();
   const batches = [];
-  
   for (let i = 0; i < placements.length; i += CONFIG.DNS_BATCH_SIZE) {
     batches.push(placements.slice(i, i + CONFIG.DNS_BATCH_SIZE));
   }
-  
   batches.forEach((batch, index) => {
     console.log(`Processing DNS batch ${index + 1}/${batches.length}`);
-    
     batch.forEach(placement => {
       const domain = extract_domain(placement.target_url);
       if (!domain) return;
-      
       try {
         const dns_info = dns_resolver.resolve_domain_ips(domain);
-        
         if (dns_info.is_blacklisted_ip && dns_info.blacklisted_ips.length > 0) {
           placement.action = 'EXCLUDE';
-          // Format only the blacklisted IPs with line breaks if multiple
-          const ip_list = dns_info.blacklisted_ips.length > 1 
-            ? dns_info.blacklisted_ips.join('\n')
-            : dns_info.blacklisted_ips[0];
-          
-          // Get the first IP blocklist URL for reference
-          const reference_url = CONFIG.IP_BLOCKLIST[0];
-          const list_name = extractListName(reference_url);
-          
-          placement.reason = `blacklisted IP:\n${ip_list}; reported in ${list_name}`;
-          placement.reference_list = createHyperlink(reference_url, list_name);
+          const all_sources = new Set();
+          const ip_source_details = [];
+          dns_info.blacklisted_ips.forEach(blocked_ip => {
+            const sources = get_ip_blacklist_sources(blocked_ip);
+            sources.forEach(source => all_sources.add(source));
+            const source_names = sources.map(source => extractListName(source));
+            ip_source_details.push(`${blocked_ip} (${source_names.join(', ')})`);
+          });
+          const ip_details = ip_source_details.length > 1
+            ? ip_source_details.join('\n')
+            : ip_source_details[0];
+          placement.reason = `blacklisted IP:\n${ip_details}`;
+          placement.reference_list = '';
         }
       } catch (error) {
         console.warn(`DNS lookup failed for ${domain}:`, error);
       }
     });
-    
-    // Rate limiting
     if (index < batches.length - 1) {
       Utilities.sleep(1000);
     }
@@ -1152,9 +1144,8 @@ function perform_dns_checks(placements) {
  */
 function get_current_est_datetime() {
   const now = new Date();
-  const est_offset = -5; // EST is UTC-5
+  const est_offset = -5;
   const est_time = new Date(now.getTime() + (est_offset * 60 * 60 * 1000));
-  
   return est_time.toLocaleString('en-US', {
     timeZone: 'America/New_York',
     year: 'numeric',
@@ -1171,34 +1162,28 @@ function get_current_est_datetime() {
  */
 function output_results(placements, timings, start_time) {
   console.log('Outputting results...');
-  
   if (!CONFIG.SHEET_URL || CONFIG.SHEET_URL === 'YOUR_SHEET_URL_HERE') {
     console.error('Sheet URL not configured - please update CONFIG.SHEET_URL');
     return;
   }
-  
   try {
     const spreadsheet = SpreadsheetApp.openByUrl(CONFIG.SHEET_URL);
-    
-    // Create or get main analysis sheet
-    let analysis_sheet = spreadsheet.getSheetByName('Analysis');
+    let analysis_sheet = spreadsheet.getSheetByName('web-exclusions');
     if (!analysis_sheet) {
-      analysis_sheet = spreadsheet.insertSheet('Analysis');
+      analysis_sheet = spreadsheet.insertSheet('web-exclusions');
     }
-    
-    // Create or get raw data sheet (hidden)
     let raw_sheet = spreadsheet.getSheetByName('gaql_output');
     if (!raw_sheet) {
       raw_sheet = spreadsheet.insertSheet('gaql_output');
       raw_sheet.hideSheet();
     }
-    
-    // Output raw data to gaql_output sheet
+    let reference_sheet = spreadsheet.getSheetByName('reference-lists');
+    if (!reference_sheet) {
+      reference_sheet = spreadsheet.insertSheet('reference-lists');
+    }
     output_raw_data(raw_sheet, placements);
-    
-    // Output analysis to main sheet
     output_analysis_data(analysis_sheet, placements, timings, start_time);
-    
+    output_reference_lists(reference_sheet);
   } catch (error) {
     console.error('Failed to output results:', error);
     throw error;
@@ -1210,7 +1195,6 @@ function output_results(placements, timings, start_time) {
  */
 function output_raw_data(sheet, placements) {
   sheet.clear();
-  
   const headers = [
     'Target URL',
     'Placement',
@@ -1225,9 +1209,7 @@ function output_raw_data(sheet, placements) {
     'Domain Rank',
     'OPR Status'
   ];
-  
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  
   const data = placements.map(placement => [
     placement.target_url,
     placement.placement,
@@ -1242,52 +1224,118 @@ function output_raw_data(sheet, placements) {
     placement.domain_rank || '',
     placement.opr_status || ''
   ]);
-  
   if (data.length > 0) {
     sheet.getRange(2, 1, data.length, headers.length).setValues(data);
   }
-  
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
   sheet.autoResizeColumns(1, headers.length);
 }
+
+
+/**
+ * Output reference lists data to new sheet
+ */
+function output_reference_lists(sheet) {
+  sheet.clear();
+  const headers = ['Repository Name', 'Type', 'Size', 'URL'];
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  const reference_data = [];
+  reference_data.push([
+    extractListName(CONFIG.SPAM_KEYWORDS),
+    'Keywords',
+    spam_keywords.length,
+    createHyperlink(CONFIG.SPAM_KEYWORDS, extractListName(CONFIG.SPAM_KEYWORDS))
+  ]);
+  reference_data.push([
+    extractListName(CONFIG.WHITELIST_DOMAINS),
+    'Whitelist Domains',
+    whitelisted_domains.size,
+    createHyperlink(CONFIG.WHITELIST_DOMAINS, extractListName(CONFIG.WHITELIST_DOMAINS))
+  ]);
+  const processed_domain_urls = new Set();
+  for (const [domain, source_urls] of blacklisted_domains) {
+    source_urls.forEach(url => {
+      if (!processed_domain_urls.has(url)) {
+        processed_domain_urls.add(url);
+        const domains_from_this_source = Array.from(blacklisted_domains.entries())
+          .filter(([d, urls]) => urls.includes(url)).length;
+        reference_data.push([
+          extractListName(url),
+          'Domain Blocklist',
+          domains_from_this_source,
+          createHyperlink(url, extractListName(url))
+        ]);
+      }
+    });
+  }
+  const processed_tld_urls = new Set();
+  for (const [tld, source_urls] of suspicious_tlds) {
+    source_urls.forEach(url => {
+      if (!processed_tld_urls.has(url)) {
+        processed_tld_urls.add(url);
+        const tlds_from_this_source = Array.from(suspicious_tlds.entries())
+          .filter(([t, urls]) => urls.includes(url)).length;
+        reference_data.push([
+          extractListName(url),
+          'TLD Blocklist',
+          tlds_from_this_source,
+          createHyperlink(url, extractListName(url))
+        ]);
+      }
+    });
+  }
+  const processed_ip_urls = new Set();
+  for (const [ip, source_urls] of blacklisted_ips) {
+    source_urls.forEach(url => {
+      if (!processed_ip_urls.has(url)) {
+        processed_ip_urls.add(url);
+        const ips_from_this_source = Array.from(blacklisted_ips.entries())
+          .filter(([i, urls]) => urls.includes(url)).length;
+        reference_data.push([
+          extractListName(url),
+          'IP Blocklist',
+          ips_from_this_source,
+          createHyperlink(url, extractListName(url))
+        ]);
+      }
+    });
+  }
+  if (reference_data.length > 0) {
+    sheet.getRange(2, 1, reference_data.length, headers.length).setValues(reference_data);
+  }
+  sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+  sheet.getRange(1, 1, 1, headers.length).setBackground('#d9d9d9');
+  sheet.autoResizeColumns(1, headers.length);
+  console.log(`Output ${reference_data.length} reference lists to reference-lists sheet`);
+}
+
 
 /**
  * Output analysis data with improved formatting
  */
 function output_analysis_data(sheet, placements, timings, start_time) {
   sheet.clear();
-  
   const total_time = new Date() - start_time;
   const excluded_count = get_excluded_count(placements);
   const keep_count = get_keep_count(placements);
   const current_datetime = get_current_est_datetime();
   const dateRange = getDateRange(CONFIG.DATES_BACK);
-  
-  // Get unique customer info
   const unique_customers = [...new Set(placements.map(p => `${p.customer_name} - ${p.customer_id}`))];
   const customer_display = unique_customers.length > 0 ? unique_customers.join(', ') : 'No accounts found';
-  
-  // Summary header - all in column A, rows 1-7
   const summary_data = [
     [`Account: ${customer_display}`],
     [`Script Last Refresh: ${current_datetime}`],
     [`Script Total Runtime: ${(total_time / 1000).toFixed(2)} seconds`],
     [`Date Range: ${dateRange.startDate} to ${dateRange.endDate}`],
     [`Total PMAX Placements: ${placements.length} | Recommended Exclusions: ${excluded_count} | Whitelisted: ${keep_count}`],
-    [`Blacklist Stats: ${spam_keywords.length} keywords, ${blacklisted_domains.size} domains, ${suspicious_tlds.size} TLDs`],
+    [`Blacklist Stats: ${spam_keywords.length} keywords, ${blacklisted_domains.size} domains, ${suspicious_tlds.size} TLDs, ${blacklisted_ips.size} IPs`],
     [`Open Page Rank: ${domain_page_ranks.size} domains analyzed | API Status: ${CONFIG.OPR_ENABLED ? 'Enabled' : 'Disabled'}`]
   ];
-  
-  // Write summary to column A, rows 1-7
   summary_data.forEach((row, index) => {
     sheet.getRange(index + 1, 1, 1, 1).setValue(row[0]);
   });
-  
-  // Format summary rows with specific styling
-  sheet.getRange(1, 1, 1, 1).setFontWeight('bold'); // Row 1: Bold
-  sheet.getRange(2, 1, 4, 1).setFontStyle('italic'); // Rows 2-5: Italic
-  
-  // Data headers starting after summary (row 9)
+  sheet.getRange(1, 1, 1, 1).setFontWeight('bold');
+  sheet.getRange(2, 1, 4, 1).setFontStyle('italic');
   const header_row = 9;
   const headers = [
     'Campaign ID',
@@ -1297,20 +1345,14 @@ function output_analysis_data(sheet, placements, timings, start_time) {
     'Display Name',
     'Action',
     'Reason',
-    'Reference List',
     'Page Rank',
     'Domain Rank'
   ];
-  
   sheet.getRange(header_row, 1, 1, headers.length).setValues([headers]);
-  
-  // Format headers with grey background and text wrap
   const header_range = sheet.getRange(header_row, 1, 1, headers.length);
   header_range.setFontWeight('bold');
   header_range.setBackground('#d9d9d9');
   header_range.setWrap(true);
-  
-  // Data rows - WITH OPEN PAGE RANK DATA
   if (placements.length > 0) {
     const data = placements.map(placement => [
       placement.campaign_id || '',
@@ -1320,54 +1362,39 @@ function output_analysis_data(sheet, placements, timings, start_time) {
       placement.display_name || '',
       placement.action || 'NEUTRAL',
       placement.reason || '',
-      placement.reference_list || '',
       placement.page_rank || '',
       placement.domain_rank || ''
     ]);
-    
     sheet.getRange(header_row + 1, 1, data.length, headers.length).setValues(data);
-    
-    // Add conditional formatting for EXCLUDE rows (Action is column 6)
     const action_range = sheet.getRange(header_row + 1, 6, data.length, 1);
     const exclude_rule = SpreadsheetApp.newConditionalFormatRule()
       .whenTextEqualTo('EXCLUDE')
       .setBackground('#ffcccc')
       .setRanges([action_range])
       .build();
-    
-    // Add conditional formatting for KEEP rows
     const keep_rule = SpreadsheetApp.newConditionalFormatRule()
       .whenTextEqualTo('KEEP')
       .setBackground('#ccffcc')
       .setRanges([action_range])
       .build();
-    
     const rules = sheet.getConditionalFormatRules();
     rules.push(exclude_rule);
     rules.push(keep_rule);
     sheet.setConditionalFormatRules(rules);
-    
-    // Enable text wrapping for the Reason column (column 7)
     const reason_range = sheet.getRange(header_row + 1, 7, data.length, 1);
     reason_range.setWrap(true);
-    
-    // Set specific column widths
-    sheet.setColumnWidth(7, 300); // Make Reason column wider (300 pixels)
-    sheet.setColumnWidth(8, 200); // Set Reference List column width (200 pixels)
-    sheet.setColumnWidth(2, 120); // Set Placement Type column width (120 pixels)
-    sheet.setColumnWidth(4, 80);  // Set Impr. column width (80 pixels)
-    sheet.setColumnWidth(9, 80);  // Set Page Rank column width (80 pixels)
-    sheet.setColumnWidth(10, 100); // Set Domain Rank column width (100 pixels)
+    sheet.setColumnWidth(7, 350);
+    sheet.setColumnWidth(2, 120);
+    sheet.setColumnWidth(4, 80);
+    sheet.setColumnWidth(8, 80);
+    sheet.setColumnWidth(9, 100);
   }
-  
-  // Auto-resize most columns but preserve custom widths for specific columns
   for (let i = 1; i <= headers.length; i++) {
-    if (![2, 4, 7, 8, 9, 10].includes(i)) {
+    if (![2, 4, 7, 8, 9].includes(i)) {
       sheet.autoResizeColumn(i);
     }
   }
-  
-  console.log(`Output ${placements.length} rows to analysis sheet`);
+  console.log(`Output ${placements.length} rows to web-exclusions sheet`);
 }
 
 /**
@@ -1379,14 +1406,9 @@ function time_function(func) {
   return new Date() - start;
 }
 
-function escape_regex(string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function log_summary(timings, total_placements, start_time) {
   const total_time = new Date() - start_time;
   const excluded_count = get_excluded_count([]);
-  
   console.log('\n=== EXECUTION SUMMARY ===');
   console.log(`Total execution time: ${(total_time / 1000).toFixed(2)}s`);
   console.log(`Blacklist fetch: ${(timings.blacklist_fetch / 1000).toFixed(2)}s`);
@@ -1410,39 +1432,4 @@ function get_excluded_count(placements) {
  */
 function get_keep_count(placements) {
   return placements.filter(p => p.action === 'KEEP').length;
-}
-
-/**
- * Test function for development
- */
-function test_script() {
-  console.log('Running test with sample data...');
-  
-  // Test domain extraction
-  console.log('Testing domain extraction...');
-  console.log(extract_domain('https://www.example.com/path?query=1'));
-  
-  // Test keyword matching
-  console.log('Testing keyword matching...');
-  console.log('infantslab.com with "infant":', isValidKeywordMatch('infantslab.com', 'infant', 0));
-  console.log('infantslab.com with "ants":', isValidKeywordMatch('infantslab.com', 'ants', 3));
-  console.log('indianexpress.com with "dia":', isValidKeywordMatch('indianexpress.com', 'dia', 2));
-  console.log('test-domain.com with "domain":', isValidKeywordMatch('test-domain.com', 'domain', 5));
-  
-  // Test auto-exclude placement types
-  console.log('Testing auto-exclude placement types...');
-  const test_placement = { placement_type: 'YOUTUBE_VIDEO', action: 'NEUTRAL', reason: '', reference_list: '' };
-  console.log('YouTube video should be excluded:', check_auto_exclude_placement_type(test_placement));
-  
-  // Test TLD extraction and filtering
-  console.log('Testing TLD extraction and filtering...');
-  console.log('Should extract tk:', extractTld('.tk'));
-  console.log('Should extract com:', extractTld('.com'));
-  console.log('Should filter com:', CONFIG.FILTER_OUT_TLDS.includes('com'));
-  console.log('Should not filter tk:', CONFIG.FILTER_OUT_TLDS.includes('tk'));
-  
-  // Test list name extraction
-  console.log('Testing list name extraction...');
-  console.log('Extract from cbuijs URL:', extractListName('https://raw.githubusercontent.com/cbuijs/accomplist/main/suspicious-tlds/plain.black.tld.list'));
-  console.log('Extract from J-Gute URL:', extractListName('https://raw.githubusercontent.com/J-Gute/pmax-words-to-exlcude/main/spam-and-irrelevant-terms'));
 }
