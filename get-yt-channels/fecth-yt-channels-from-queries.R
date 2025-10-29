@@ -1,5 +1,6 @@
 # try to scrape youtube query results for channel handles or ids
 # works with <=30 queries, start expereincing rate-limiting beyond that
+# this script was utilized to create https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-spam-irrelevant-channels
 
 fetch_youtube_minimal_footprint <- function(queries, max_queries = 10) {
   
