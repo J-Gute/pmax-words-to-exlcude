@@ -43,12 +43,16 @@ const CONFIG = {
     'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/bad.abuse.list',
     'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/black.brazil.ip.list',
     'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/black.china.ip.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/black.hong_kong.ip.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/black.india.ip.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/black.philippines.ip.list',
+    'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/black.russia.ip.list',
     'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/chris/black.japan.ip.list',
     'https://raw.githubusercontent.com/cbuijs/accomplist/refs/heads/main/bogons/plain.black.ipcidr.list',
     'https://raw.githubusercontent.com/ShadowWhisperer/IPs/master/Malware/Hosting',
     'https://raw.githubusercontent.com/sefinek/Malicious-IP-Addresses/main/lists/main.txt'
   ],
-  SHEET_URL: 'https://docs.google.com/spreadsheets/d/1rs9iktuy8uMxpnT75ddUyGKpyZib4552nOY-3yAvtJc/edit?gid=67462327#gid=67462327',
+  SHEET_URL: 'URL here',
   DATES_BACK: 10,
   MIN_IMPRESSIONS: 2,
   DNS_BATCH_SIZE: 25,
@@ -57,7 +61,7 @@ const CONFIG = {
   WORD_BOUNDARY_CHARS: ['.', '-', '_', '/', '?', '&', '=', '+'],
   AUTO_EXCLUDE_TYPES: ['YOUTUBE_VIDEO', 'MOBILE_APPLICATION'],
   FILTER_OUT_TLDS: ['com', 'org', 'edu', 'de', 'uk', 'fr', 'jp', 'kr', 'us', 'es', 'ch', 'ir', 'pl'],
-  OPR_API_KEY: '8w4go4ssos4o0skg8ok80w44o80gcgccowwcwsk8',
+  OPR_API_KEY: 'API key here',
   OPR_BATCH_SIZE: 100,
   OPR_ENABLED: true,
 };
@@ -180,7 +184,7 @@ function generateDynamicName(owner, repo, category, filename, platform) {
     'gambling': 'Gambling Domains',
     'games': 'Gaming Domains',
     'streaming': 'Streaming Domains',
-    'chris': 'Investigation Domains',
+    'chris': 'Regional Blacklisted Domains',
     'warez': 'Warez Domains',
     'suspicious-tlds': 'Suspicious TLDs',
     'abuse-tlds': 'Abuse TLDs',
@@ -208,7 +212,11 @@ function generateDynamicName(owner, repo, category, filename, platform) {
   const geoPatterns = {
     'brazil': 'Brazil',
     'china': 'China',
-    'japan': 'Japan'
+    'japan': 'Japan',
+    'hong_kong' : 'Hong Kong',
+    'india' : 'India',
+    'philippines' : 'Philippines',
+    'russia' : 'Russia'
   };
   let baseName = ownerPatterns[normalizedOwner] || capitalizeFirst(owner);
   let geoContext = '';
@@ -453,6 +461,58 @@ function is_ip_in_cidr(ip, cidr) {
     return false;
   }
 }
+
+/**
+ * Get all matching blacklist entries for a specific IP
+ * Returns array of entries as they appear in blacklists (handles multiple formats)
+ */
+function get_matching_blacklist_entries(ip) {
+  const matching_entries = [];
+  
+  // Check for exact IP match
+  if (blacklisted_ips.has(ip)) {
+    matching_entries.push(ip);
+  }
+  
+  // Check for exact match with /32 notation
+  const exact_match = `${ip}/32`;
+  if (blacklisted_ips.has(exact_match)) {
+    matching_entries.push(exact_match);
+  }
+  
+  // Check all CIDR ranges and collect ALL matches
+  for (const [blocked_cidr, sources] of blacklisted_ips) {
+    if (blocked_cidr.includes('/')) {
+      if (is_ip_in_cidr(ip, blocked_cidr)) {
+        // Only add if not already in the list
+        if (!matching_entries.includes(blocked_cidr)) {
+          matching_entries.push(blocked_cidr);
+        }
+      }
+    } else {
+      if (blocked_cidr === ip) {
+        // Only add if not already in the list
+        if (!matching_entries.includes(blocked_cidr)) {
+          matching_entries.push(blocked_cidr);
+        }
+      }
+    }
+  }
+  
+  // If no matches found, return the IP itself as fallback
+  return matching_entries.length > 0 ? matching_entries : [ip];
+}
+
+/**
+ * Get blacklist sources for a specific entry format
+ */
+function get_ip_blacklist_sources_for_entry(entry) {
+  if (blacklisted_ips.has(entry)) {
+    return blacklisted_ips.get(entry);
+  }
+  return [];
+}
+
 
 /**
  * Get date range for GAQL query
@@ -1050,7 +1110,6 @@ function check_spam_keywords_improved(domain, placement) {
   return false;
 }
 
-
 /**
  * Simplified DNS resolver class
  */
@@ -1097,7 +1156,7 @@ class SimpleDNSResolver {
 }
 
 /**
- * Perform DNS checks in batches - UPDATED WITH MULTIPLE SOURCE TRACKING
+ * Perform DNS checks in batches - UPDATED TO SHOW ALL ORIGINAL BLACKLIST FORMATS
  */
 function perform_dns_checks(placements) {
   console.log(`Performing DNS checks for ${placements.length} placements...`);
@@ -1115,17 +1174,22 @@ function perform_dns_checks(placements) {
         const dns_info = dns_resolver.resolve_domain_ips(domain);
         if (dns_info.is_blacklisted_ip && dns_info.blacklisted_ips.length > 0) {
           placement.action = 'EXCLUDE';
-          const all_sources = new Set();
-          const ip_source_details = [];
+          const all_ip_details = [];
+          
           dns_info.blacklisted_ips.forEach(blocked_ip => {
-            const sources = get_ip_blacklist_sources(blocked_ip);
-            sources.forEach(source => all_sources.add(source));
-            const source_names = sources.map(source => extractListName(source));
-            ip_source_details.push(`${blocked_ip} (${source_names.join(', ')})`);
+            // Get ALL matching blacklist entries for this IP
+            const matching_entries = get_matching_blacklist_entries(blocked_ip);
+            
+            matching_entries.forEach(entry => {
+              const sources = get_ip_blacklist_sources_for_entry(entry);
+              const source_names = sources.map(source => extractListName(source));
+              all_ip_details.push(`${entry} (${source_names.join(', ')})`);
+            });
           });
-          const ip_details = ip_source_details.length > 1
-            ? ip_source_details.join('\n')
-            : ip_source_details[0];
+          
+          // Remove duplicates and format output
+          const unique_details = [...new Set(all_ip_details)];
+          const ip_details = unique_details.join('\n');
           placement.reason = `blacklisted IP:\n${ip_details}`;
           placement.reference_list = '';
         }
