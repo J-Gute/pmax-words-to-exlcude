@@ -1,8 +1,211 @@
 /**
- * PMAX YouTube Placement Analysis Script - WITH CHANNEL LOOKUP
+ * PMAX YouTube Placement Analysis Script
  * Fetches blacklists, analyzes PMAX YouTube placements, and flags suspicious channels/videos
- * Includes YouTube video page scraping to get channel information
  */
+
+const CACHE_CONFIG = {
+  CACHE_DURATION_WEEKS: 4,
+  CACHE_DURATION_MS: 4 * 7 * 24 * 60 * 60 * 1000,
+  CACHE_KEY_PREFIX: 'yt_channel_',
+  CACHE_METADATA_KEY: 'yt_cache_metadata',
+  MAX_CACHE_ENTRIES: 2000, 
+  CLEANUP_INTERVAL_DAYS: 7
+};
+
+// Enhanced channel cache with persistent storage
+class YouTubeChannelCache {
+  constructor() {
+    this.properties = PropertiesService.getScriptProperties();
+    this.memoryCache = new Map(); // In-memory cache for current session
+    this.cacheStats = {
+      hits: 0,
+      misses: 0,
+      fetches: 0,
+      stores: 0
+    };
+  }
+
+  // Generate cache key for video ID
+  generateCacheKey(videoId) {
+    return `${CACHE_CONFIG.CACHE_KEY_PREFIX}${videoId}`;
+  }
+
+  // Get channel info from cache (memory first, then persistent)
+  get(videoId) {
+    if (!videoId) return null;
+
+    // Check memory cache first (fastest)
+    if (this.memoryCache.has(videoId)) {
+      this.cacheStats.hits++;
+      return this.memoryCache.get(videoId);
+    }
+
+    // Check persistent cache
+    try {
+      const cacheKey = this.generateCacheKey(videoId);
+      const cachedData = this.properties.getProperty(cacheKey);
+      
+      if (cachedData) {
+        const parsed = JSON.parse(cachedData);
+        const now = Date.now();
+        
+        // Check if cache entry is still valid
+        if (now - parsed.timestamp < CACHE_CONFIG.CACHE_DURATION_MS) {
+          // Store in memory cache for faster access
+          this.memoryCache.set(videoId, parsed.data);
+          this.cacheStats.hits++;
+          return parsed.data;
+        } else {
+          // Cache expired, remove it
+          this.properties.deleteProperty(cacheKey);
+        }
+      }
+    } catch (error) {
+      console.warn(`Cache read error for ${videoId}:`, error);
+    }
+
+    this.cacheStats.misses++;
+    return null;
+  }
+
+  // Store channel info in cache (both memory and persistent)
+  set(videoId, channelInfo) {
+    if (!videoId || !channelInfo) return;
+
+    try {
+      // Store in memory cache
+      this.memoryCache.set(videoId, channelInfo);
+
+      // Store in persistent cache with timestamp
+      const cacheKey = this.generateCacheKey(videoId);
+      const cacheEntry = {
+        data: channelInfo,
+        timestamp: Date.now(),
+        videoId: videoId
+      };
+
+      this.properties.setProperty(cacheKey, JSON.stringify(cacheEntry));
+      this.cacheStats.stores++;
+
+      // Update cache metadata
+      this.updateCacheMetadata(videoId);
+
+    } catch (error) {
+      console.warn(`Cache write error for ${videoId}:`, error);
+    }
+  }
+
+  // Update cache metadata for cleanup purposes
+  updateCacheMetadata(videoId) {
+    try {
+      const metadataStr = this.properties.getProperty(CACHE_CONFIG.CACHE_METADATA_KEY);
+      let metadata = metadataStr ? JSON.parse(metadataStr) : { entries: [], lastCleanup: 0 };
+
+      // Add new entry
+      metadata.entries.push({
+        videoId: videoId,
+        timestamp: Date.now()
+      });
+
+      // Keep only recent entries to prevent metadata from growing too large
+      const cutoff = Date.now() - CACHE_CONFIG.CACHE_DURATION_MS;
+      metadata.entries = metadata.entries.filter(entry => entry.timestamp > cutoff);
+
+      // Limit total entries
+      if (metadata.entries.length > CACHE_CONFIG.MAX_CACHE_ENTRIES) {
+        metadata.entries = metadata.entries.slice(-CACHE_CONFIG.MAX_CACHE_ENTRIES);
+      }
+
+      this.properties.setProperty(CACHE_CONFIG.CACHE_METADATA_KEY, JSON.stringify(metadata));
+    } catch (error) {
+      console.warn('Cache metadata update error:', error);
+    }
+  }
+
+  // Clean up expired cache entries
+  cleanup() {
+    try {
+      console.log('Starting cache cleanup...');
+      const metadataStr = this.properties.getProperty(CACHE_CONFIG.CACHE_METADATA_KEY);
+      
+      if (!metadataStr) {
+        console.log('No cache metadata found, skipping cleanup');
+        return;
+      }
+
+      const metadata = JSON.parse(metadataStr);
+      const now = Date.now();
+      const cutoff = now - CACHE_CONFIG.CACHE_DURATION_MS;
+      let deletedCount = 0;
+
+      // Check if cleanup is needed
+      const cleanupInterval = CACHE_CONFIG.CLEANUP_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
+      if (metadata.lastCleanup && (now - metadata.lastCleanup) < cleanupInterval) {
+        console.log('Cache cleanup not needed yet');
+        return;
+      }
+
+      // Clean up expired entries
+      for (const entry of metadata.entries) {
+        if (entry.timestamp < cutoff) {
+          const cacheKey = this.generateCacheKey(entry.videoId);
+          this.properties.deleteProperty(cacheKey);
+          deletedCount++;
+        }
+      }
+
+      // Update metadata
+      metadata.entries = metadata.entries.filter(entry => entry.timestamp >= cutoff);
+      metadata.lastCleanup = now;
+      this.properties.setProperty(CACHE_CONFIG.CACHE_METADATA_KEY, JSON.stringify(metadata));
+
+      console.log(`Cache cleanup complete: ${deletedCount} expired entries removed`);
+    } catch (error) {
+      console.warn('Cache cleanup error:', error);
+    }
+  }
+
+  // Get cache statistics
+  getStats() {
+    const hitRate = this.cacheStats.hits + this.cacheStats.misses > 0 
+      ? (this.cacheStats.hits / (this.cacheStats.hits + this.cacheStats.misses) * 100).toFixed(1)
+      : 0;
+
+    return {
+      ...this.cacheStats,
+      hitRate: `${hitRate}%`,
+      memorySize: this.memoryCache.size
+    };
+  }
+
+  // Clear all cache data (for testing/debugging)
+  clear() {
+    try {
+      // Clear memory cache
+      this.memoryCache.clear();
+
+      // Clear persistent cache
+      const metadataStr = this.properties.getProperty(CACHE_CONFIG.CACHE_METADATA_KEY);
+      if (metadataStr) {
+        const metadata = JSON.parse(metadataStr);
+        for (const entry of metadata.entries) {
+          const cacheKey = this.generateCacheKey(entry.videoId);
+          this.properties.deleteProperty(cacheKey);
+        }
+      }
+
+      // Clear metadata
+      this.properties.deleteProperty(CACHE_CONFIG.CACHE_METADATA_KEY);
+      
+      console.log('Cache cleared successfully');
+    } catch (error) {
+      console.warn('Cache clear error:', error);
+    }
+  }
+}
+
+// Global cache instance
+let youtubeChannelCache = new YouTubeChannelCache();
 
 const YT_CONFIG = {
   CHANNEL_BLACKLISTS: [
@@ -17,8 +220,8 @@ const YT_CONFIG = {
     'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/ru-negatives',
     'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/th-negatives'
   ],
-  SHEET_URL: 'URL here',
-  DATES_BACK: 10,
+  SHEET_URL: 'https://docs.google.com/spreadsheets/d/1rs9iktuy8uMxpnT75ddUyGKpyZib4552nOY-3yAvtJc/edit?gid=67462327#gid=67462327',
+  DATES_BACK: 15,
   MIN_IMPRESSIONS: 2,
   BATCH_SIZE: 50,
   MAX_RETRIES: 3,
@@ -27,9 +230,8 @@ const YT_CONFIG = {
   MAX_NGRAM: 3,
   MIN_TERM_LENGTH: 3,
   MIN_PHRASE_LENGTH: 4,
-  EXACT_MATCH_REQUIRED: false,
+  EXACT_MATCH_REQUIRED: true,
   ENABLE_DETAILED_LOGGING: true,
-  CACHE_CHANNEL_DATA: true,
   YOUTUBE_FETCH_DELAY: 1000, // Delay between YouTube page fetches
   MAX_YOUTUBE_FETCHES: 100   // Limit to avoid timeouts
 };
@@ -37,7 +239,6 @@ const YT_CONFIG = {
 let yt_channel_blacklist = new Map();
 let mcc_video_exclusions = new Set();
 let negative_terms = new Map();
-let channel_cache = new Map();
 let youtube_fetch_count = 0;
 
 function extractYtListName(url) {
@@ -92,31 +293,44 @@ function generateYtDynamicName(owner, repo, category, filename, platform) {
   const normalizedRepo = repo.toLowerCase();
   const normalizedCategory = category.toLowerCase();
   const normalizedFilename = filename.toLowerCase();
+  
   const ownerPatterns = {
     'j-gute': 'di sw'
   };
+  
   const categoryPatterns = {
     'streaming': 'YouTube Streaming',
     'yt-channels': 'YouTube Channels',
     'yt-terms': 'Negative Terms & Phrases',
     'yt-negative': 'YouTube Negative Content',
+    'yt-negative-term-phrases': 'Regional Negative Terms',
     'mcc-master': 'MCC Master List',
     'adult-themed': 'Adult Content'
   };
+  
   const filenamePatterns = {
     'channel-blacklist': 'Channel Blacklist',
     'video-exclusion': 'Video Exclusions',
     'negative-terms': '"Spam" and/or Irrelevant Terms',
     'negative-phrases': 'Negative Phrases',
     'spam-channels': '"Spam" and/or Irrelevant Channels',
-    'spam-terms': 'Spam Terms'
+    'spam-terms': 'Spam Terms',
+    // Regional negative terms
+    'jp-negatives': 'Japanese Negative Terms',
+    'kr-negatives': 'Korean Negative Terms',
+    'ru-negatives': 'Russian Negative Terms',
+    'th-negatives': 'Thai Negative Terms',
+    'cn-negatives': 'Chinese (Simplified) Negative Terms'
   };
+  
   let baseName = ownerPatterns[normalizedOwner] || capitalizeFirst(owner);
   let contentType = '';
-  if (categoryPatterns[normalizedCategory]) {
-    contentType = categoryPatterns[normalizedCategory];
-  } else if (filenamePatterns[normalizedFilename.split('.')[0]]) {
+  
+  // Check for specific filename patterns first (for regional files)
+  if (filenamePatterns[normalizedFilename.split('.')[0]]) {
     contentType = filenamePatterns[normalizedFilename.split('.')[0]];
+  } else if (categoryPatterns[normalizedCategory]) {
+    contentType = categoryPatterns[normalizedCategory];
   } else if (normalizedFilename.includes('channel')) {
     contentType = 'YouTube Channels';
   } else if (normalizedFilename.includes('video')) {
@@ -126,6 +340,7 @@ function generateYtDynamicName(owner, repo, category, filename, platform) {
   } else {
     contentType = capitalizeFirst(category.replace(/[-_]/g, ' '));
   }
+  
   return `${baseName} ${contentType}`.trim();
 }
 
@@ -182,19 +397,25 @@ function extractVideoId(url) {
   }
 }
 
-// NEW FUNCTION: Fetch YouTube video page and extract channel information
+// ENHANCED: Fetch YouTube video page and extract channel information with 4-week caching
 function fetchYouTubeChannelInfo(videoId) {
   if (!videoId || youtube_fetch_count >= YT_CONFIG.MAX_YOUTUBE_FETCHES) {
     return { channel_id: null, channel_handle: null, channel_name: null };
   }
   
-  // Check cache first
-  if (YT_CONFIG.CACHE_CHANNEL_DATA && channel_cache.has(videoId)) {
-    return channel_cache.get(videoId);
+  // Check cache first (4-week persistent cache)
+  const cachedInfo = youtubeChannelCache.get(videoId);
+  if (cachedInfo) {
+    if (YT_CONFIG.ENABLE_DETAILED_LOGGING && youtube_fetch_count <= 5) {
+      console.log(`Cache HIT for video ${videoId}: ${cachedInfo.channel_id || cachedInfo.channel_handle || 'no channel info'}`);
+    }
+    return cachedInfo;
   }
   
   try {
     youtube_fetch_count++;
+    youtubeChannelCache.cacheStats.fetches++;
+    
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     
     if (YT_CONFIG.ENABLE_DETAILED_LOGGING && youtube_fetch_count <= 5) {
@@ -216,9 +437,11 @@ function fetchYouTubeChannelInfo(videoId) {
     const html = response.getContentText();
     const channelInfo = extractChannelFromHtml(html);
     
-    // Cache the result
-    if (YT_CONFIG.CACHE_CHANNEL_DATA) {
-      channel_cache.set(videoId, channelInfo);
+    // Cache the result for 4 weeks
+    youtubeChannelCache.set(videoId, channelInfo);
+    
+    if (YT_CONFIG.ENABLE_DETAILED_LOGGING && youtube_fetch_count <= 5) {
+      console.log(`Extracted and cached: ${channelInfo.channel_id || channelInfo.channel_handle || 'no channel info'}`);
     }
     
     // Add delay to avoid rate limiting
@@ -233,15 +456,13 @@ function fetchYouTubeChannelInfo(videoId) {
     const emptyInfo = { channel_id: null, channel_handle: null, channel_name: null };
     
     // Cache empty result to avoid retrying
-    if (YT_CONFIG.CACHE_CHANNEL_DATA) {
-      channel_cache.set(videoId, emptyInfo);
-    }
+    youtubeChannelCache.set(videoId, emptyInfo);
     
     return emptyInfo;
   }
 }
 
-// NEW FUNCTION: Extract channel information from YouTube HTML
+// Extract channel information from YouTube HTML
 function extractChannelFromHtml(html) {
   const channelInfo = {
     channel_id: null,
@@ -308,7 +529,7 @@ function extractChannelFromHtml(html) {
   }
 }
 
-// UPDATED: Enhanced channel extraction with YouTube page lookup
+// Enhanced channel extraction with YouTube page lookup and 4-week caching
 function extractChannelIdentifiers(placement) {
   const identifiers = {
     channel_id: null,
@@ -360,7 +581,7 @@ function extractChannelIdentifiers(placement) {
       }
     }
     
-    // If we didn't find channel info in placement data, fetch from YouTube page
+    // If we didn't find channel info in placement data, fetch from YouTube page (with 4-week caching)
     if (!identifiers.channel_id && !identifiers.channel_handle && identifiers.video_id) {
       const youtubeInfo = fetchYouTubeChannelInfo(identifiers.video_id);
       identifiers.channel_id = youtubeInfo.channel_id;
@@ -506,6 +727,10 @@ function loadNegativeTerms() {
 
 function fetchAllYtBlacklists() {
   console.log('Fetching YouTube blacklists...');
+  
+  // Perform cache cleanup at the start
+  youtubeChannelCache.cleanup();
+  
   yt_channel_blacklist = loadYtChannelBlacklists();
   mcc_video_exclusions = loadMccVideoExclusions();
   negative_terms = loadNegativeTerms();
@@ -749,6 +974,7 @@ function checkChannelBlacklist(placement) {
 function analyzeYtPlacements(placements) {
   console.log('Analyzing YouTube placements...');
   console.log(`Will fetch channel data from YouTube for up to ${Math.min(placements.length, YT_CONFIG.MAX_YOUTUBE_FETCHES)} videos`);
+  console.log(`4-week cache enabled - cache stats will be shown at the end`);
   
   placements.forEach((placement, index) => {
     const identifiers = extractChannelIdentifiers(placement);
@@ -764,6 +990,11 @@ function analyzeYtPlacements(placements) {
   const excluded_count = placements.filter(p => p.action === 'EXCLUDE').length;
   console.log(`Analysis complete: ${excluded_count}/${placements.length} placements flagged for exclusion`);
   console.log(`YouTube pages fetched: ${youtube_fetch_count}`);
+  
+  // Show cache statistics
+  const cacheStats = youtubeChannelCache.getStats();
+  console.log(`Cache statistics: ${cacheStats.hits} hits, ${cacheStats.misses} misses, ${cacheStats.hitRate} hit rate`);
+  console.log(`Cache stores: ${cacheStats.stores}, Memory cache size: ${cacheStats.memorySize}`);
   
   const mcc_exclusions = placements.filter(p => p.reason && p.reason.includes('MCC master exclusion')).length;
   const term_exclusions = placements.filter(p => p.reason && p.reason.includes('term/phrase detected')).length;
@@ -867,6 +1098,10 @@ function outputYtAnalysisData(sheet, placements, timings, start_time) {
   const dateRange = getYtDateRange(YT_CONFIG.DATES_BACK);
   const unique_customers = [...new Set(placements.map(p => `${p.customer_name} - ${p.customer_id}`))];
   const customer_display = unique_customers.length > 0 ? unique_customers.join(', ') : 'No accounts found';
+  
+  // Get cache statistics for display
+  const cacheStats = youtubeChannelCache.getStats();
+  
   const summary_data = [
     [`Account: ${customer_display}`],
     [`YouTube Script Last Refresh: ${current_datetime}`],
@@ -874,14 +1109,15 @@ function outputYtAnalysisData(sheet, placements, timings, start_time) {
     [`Date Range: ${dateRange.startDate} to ${dateRange.endDate}`],
     [`Total YouTube Placements: ${placements.length} | Recommended Exclusions: ${excluded_count}`],
     [`Blacklist Stats: ${yt_channel_blacklist.size} channels, ${mcc_video_exclusions.size} videos, ${negative_terms.size} terms`],
-    [`Analysis: N-gram range ${YT_CONFIG.MIN_NGRAM}-${YT_CONFIG.MAX_NGRAM}, Min term length: ${YT_CONFIG.MIN_TERM_LENGTH} | YouTube fetches: ${youtube_fetch_count}`]
+    [`Analysis: N-gram range ${YT_CONFIG.MIN_NGRAM}-${YT_CONFIG.MAX_NGRAM}, Min term length: ${YT_CONFIG.MIN_TERM_LENGTH} | YouTube fetches: ${youtube_fetch_count}`],
+    [`Cache: ${cacheStats.hitRate} hit rate, ${cacheStats.hits} hits, ${cacheStats.misses} misses, 4-week retention`]
   ];
   summary_data.forEach((row, index) => {
     sheet.getRange(index + 1, 1, 1, 1).setValue(row[0]);
   });
   sheet.getRange(1, 1, 1, 1).setFontWeight('bold');
   sheet.getRange(2, 1, 4, 1).setFontStyle('italic');
-  const header_row = 9;
+  const header_row = 10;
   const headers = [
     'Campaign ID',
     'Placement Type',
@@ -992,6 +1228,8 @@ function timeYtFunction(func) {
 function logYtSummary(timings, total_placements, start_time) {
   const total_time = new Date() - start_time;
   const excluded_count = total_placements.filter ? total_placements.filter(p => p.action === 'EXCLUDE').length : 0;
+  const cacheStats = youtubeChannelCache.getStats();
+  
   console.log('\n=== YOUTUBE EXECUTION SUMMARY ===');
   console.log(`Total execution time: ${(total_time / 1000).toFixed(2)}s`);
   console.log(`Blacklist fetch: ${(timings.blacklist_fetch / 1000).toFixed(2)}s`);
@@ -1001,17 +1239,19 @@ function logYtSummary(timings, total_placements, start_time) {
   console.log(`Total YouTube placements analyzed: ${Array.isArray(total_placements) ? total_placements.length : total_placements}`);
   console.log(`Placements flagged for exclusion: ${excluded_count}`);
   console.log(`YouTube pages fetched: ${youtube_fetch_count}`);
+  console.log(`Cache performance: ${cacheStats.hitRate} hit rate (${cacheStats.hits} hits, ${cacheStats.misses} misses)`);
+  console.log(`Cache efficiency: Saved ${cacheStats.hits} YouTube page fetches with 4-week retention`);
   console.log('=================================\n');
 }
 
 function main() {
   const start_time = new Date();
-  console.log('Starting PMAX YouTube Placement Analysis with Channel Lookup...');
+  console.log('Starting PMAX YouTube Placement Analysis with 4-Week Channel Caching...');
   const timings = {};
   let placements = [];
   
   try {
-    // Fetch blacklists
+    // Fetch blacklists (includes cache cleanup)
     timings.blacklist_fetch = timeYtFunction(() => fetchAllYtBlacklists());
     
     // Fetch YouTube placements
@@ -1020,7 +1260,7 @@ function main() {
       return placements;
     });
     
-    // Analyze placements (includes YouTube page fetching)
+    // Analyze placements (includes YouTube page fetching with 4-week caching)
     timings.analysis = timeYtFunction(() => analyzeYtPlacements(placements));
     
     // Output results
