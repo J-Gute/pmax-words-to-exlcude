@@ -220,7 +220,7 @@ const YT_CONFIG = {
     'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/ru-negatives',
     'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/th-negatives'
   ],
-  SHEET_URL: 'https://docs.google.com/spreadsheets/d/1rs9iktuy8uMxpnT75ddUyGKpyZib4552nOY-3yAvtJc/edit?gid=67462327#gid=67462327',
+  SHEET_URL: 'URL here',
   DATES_BACK: 15,
   MIN_IMPRESSIONS: 2,
   BATCH_SIZE: 50,
