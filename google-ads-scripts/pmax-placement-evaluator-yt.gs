@@ -1,6 +1,7 @@
 /**
  * PMAX YouTube Placement Analysis Script
  * Fetches blacklists, analyzes PMAX YouTube placements, and flags suspicious channels/videos
+ * Includes 4-week caching for channel data
  */
 
 const CACHE_CONFIG = {
@@ -225,7 +226,7 @@ const YT_CONFIG = {
   MIN_IMPRESSIONS: 2,
   BATCH_SIZE: 50,
   MAX_RETRIES: 3,
-  REQUEST_DELAY: 500,
+  REQUEST_DELAY: 2500,
   MIN_NGRAM: 1,
   MAX_NGRAM: 3,
   MIN_TERM_LENGTH: 3,
@@ -233,7 +234,7 @@ const YT_CONFIG = {
   EXACT_MATCH_REQUIRED: true,
   ENABLE_DETAILED_LOGGING: true,
   YOUTUBE_FETCH_DELAY: 1000, // Delay between YouTube page fetches
-  MAX_YOUTUBE_FETCHES: 100   // Limit to avoid timeouts
+  MAX_YOUTUBE_FETCHES: 150   // Limit to avoid timeouts
 };
 
 let yt_channel_blacklist = new Map();
@@ -295,7 +296,7 @@ function generateYtDynamicName(owner, repo, category, filename, platform) {
   const normalizedFilename = filename.toLowerCase();
   
   const ownerPatterns = {
-    'j-gute': 'di sw'
+    'j-gute': 'J-Gute'
   };
   
   const categoryPatterns = {
@@ -311,16 +312,18 @@ function generateYtDynamicName(owner, repo, category, filename, platform) {
   const filenamePatterns = {
     'channel-blacklist': 'Channel Blacklist',
     'video-exclusion': 'Video Exclusions',
-    'negative-terms': '"Spam" and/or Irrelevant Terms',
+    'negative-terms': 'Spam/Irrelevant Terms',
     'negative-phrases': 'Negative Phrases',
-    'spam-channels': '"Spam" and/or Irrelevant Channels',
+    'spam-channels': 'Spam/Irrelevant Channels',
     'spam-terms': 'Spam Terms',
-    // Regional negative terms
+    'kids-channels': 'Kids Content Channels',
+    'yt-kids-channels': 'Kids Content Channels',
+    'yt-spam-irrelevant-channels': 'Spam/Irrelevant Channels',
     'jp-negatives': 'Japanese Negative Terms',
     'kr-negatives': 'Korean Negative Terms',
     'ru-negatives': 'Russian Negative Terms',
     'th-negatives': 'Thai Negative Terms',
-    'cn-negatives': 'Chinese (Simplified) Negative Terms'
+    'cn-negatives': 'Chinese Negative Terms'
   };
   
   let baseName = ownerPatterns[normalizedOwner] || capitalizeFirst(owner);
@@ -331,6 +334,10 @@ function generateYtDynamicName(owner, repo, category, filename, platform) {
     contentType = filenamePatterns[normalizedFilename.split('.')[0]];
   } else if (categoryPatterns[normalizedCategory]) {
     contentType = categoryPatterns[normalizedCategory];
+  } else if (normalizedFilename.includes('kids')) {
+    contentType = 'Kids Content';
+  } else if (normalizedFilename.includes('spam')) {
+    contentType = 'Spam Content';
   } else if (normalizedFilename.includes('channel')) {
     contentType = 'YouTube Channels';
   } else if (normalizedFilename.includes('video')) {
@@ -341,7 +348,7 @@ function generateYtDynamicName(owner, repo, category, filename, platform) {
     contentType = capitalizeFirst(category.replace(/[-_]/g, ' '));
   }
   
-  return `${baseName} ${contentType}`.trim();
+  return `${baseName} - ${contentType}`.trim();
 }
 
 function capitalizeFirst(str) {
@@ -463,6 +470,7 @@ function fetchYouTubeChannelInfo(videoId) {
 }
 
 // Extract channel information from YouTube HTML
+// Extract channel information from YouTube HTML
 function extractChannelFromHtml(html) {
   const channelInfo = {
     channel_id: null,
@@ -493,13 +501,13 @@ function extractChannelFromHtml(html) {
       }
     }
     
-    // Method 4: Look for channel handle (@handle)
+    // Method 4: Look for channel handle (@handle) - Enhanced patterns
     match = html.match(/"canonicalChannelUrl":"[^"]*\/@([^"\/]+)"/);
     if (match) {
       channelInfo.channel_handle = match[1];
     }
     
-    // Method 5: Look for channel handle in different format
+    // Method 5: Look for channel handle in webCommandMetadata
     if (!channelInfo.channel_handle) {
       match = html.match(/"webCommandMetadata":{"url":"[^"]*\/@([^"\/]+)"/);
       if (match) {
@@ -507,15 +515,55 @@ function extractChannelFromHtml(html) {
       }
     }
     
-    // Method 6: Look for channel name
+    // Method 6: Look for handle in navigationEndpoint
+    if (!channelInfo.channel_handle) {
+      match = html.match(/"navigationEndpoint":{"[^"]*":"[^"]*\/@([^"\/]+)"/);
+      if (match) {
+        channelInfo.channel_handle = match[1];
+      }
+    }
+    
+    // Method 7: Look for handle in browseEndpoint
+    if (!channelInfo.channel_handle) {
+      match = html.match(/"browseEndpoint":{"browseId":"@([^"\/]+)"/);
+      if (match) {
+        channelInfo.channel_handle = match[1];
+      }
+    }
+    
+    // Method 8: Look for handle in various URL contexts
+    if (!channelInfo.channel_handle) {
+      match = html.match(/youtube\.com\/@([a-zA-Z0-9_.-]+)/);
+      if (match) {
+        channelInfo.channel_handle = match[1];
+      }
+    }
+    
+    // Method 9: Look for handle in JSON data
+    if (!channelInfo.channel_handle) {
+      match = html.match(/"handle":"@([^"]+)"/);
+      if (match) {
+        channelInfo.channel_handle = match[1];
+      }
+    }
+    
+    // Method 10: Look for channel name
     match = html.match(/"ownerChannelName":"([^"]+)"/);
     if (match) {
       channelInfo.channel_name = match[1];
     }
     
-    // Method 7: Look for channel name in author
+    // Method 11: Look for channel name in author
     if (!channelInfo.channel_name) {
       match = html.match(/"author":"([^"]+)"/);
+      if (match) {
+        channelInfo.channel_name = match[1];
+      }
+    }
+    
+    // Method 12: Look for channel name in title
+    if (!channelInfo.channel_name) {
+      match = html.match(/"title":{"runs":\[{"text":"([^"]+)"/);
       if (match) {
         channelInfo.channel_name = match[1];
       }
@@ -529,7 +577,6 @@ function extractChannelFromHtml(html) {
   }
 }
 
-// Enhanced channel extraction with YouTube page lookup and 4-week caching
 function extractChannelIdentifiers(placement) {
   const identifiers = {
     channel_id: null,
@@ -549,31 +596,44 @@ function extractChannelIdentifiers(placement) {
     for (const source of sources) {
       const value = String(source);
       
-      // Channel ID patterns
+      // Channel ID patterns (more comprehensive)
       if (!identifiers.channel_id) {
+        // Full channel URL
         const channelMatch = value.match(/youtube\.com\/channel\/([a-zA-Z0-9_-]+)/);
         if (channelMatch) {
           identifiers.channel_id = channelMatch[1];
         }
         
+        // Direct UC pattern
         const idMatch = value.match(/(UC[a-zA-Z0-9_-]{22})/);
         if (idMatch) {
           identifiers.channel_id = idMatch[0];
         }
       }
       
-      // Channel handle patterns
+      // Channel handle patterns (enhanced)
       if (!identifiers.channel_handle) {
-        const handleMatch = value.match(/@([a-zA-Z0-9_.-]+)/);
+        // Handle with @ symbol
+        const handleMatch = value.match(/youtube\.com\/@([a-zA-Z0-9_.-]+)/);
         if (handleMatch) {
           identifiers.channel_handle = handleMatch[1];
         }
         
+        // Direct @ pattern
+        if (!identifiers.channel_handle) {
+          const directHandleMatch = value.match(/@([a-zA-Z0-9_.-]+)/);
+          if (directHandleMatch && !value.includes('mailto:')) {
+            identifiers.channel_handle = directHandleMatch[1];
+          }
+        }
+        
+        // Custom channel URL
         const cMatch = value.match(/youtube\.com\/c\/([a-zA-Z0-9_.-]+)/);
         if (cMatch) {
           identifiers.channel_handle = cMatch[1];
         }
         
+        // User channel URL
         const userMatch = value.match(/youtube\.com\/user\/([a-zA-Z0-9_.-]+)/);
         if (userMatch) {
           identifiers.channel_handle = userMatch[1];
@@ -582,7 +642,7 @@ function extractChannelIdentifiers(placement) {
     }
     
     // If we didn't find channel info in placement data, fetch from YouTube page (with 4-week caching)
-    if (!identifiers.channel_id && !identifiers.channel_handle && identifiers.video_id) {
+    if ((!identifiers.channel_id && !identifiers.channel_handle) && identifiers.video_id) {
       const youtubeInfo = fetchYouTubeChannelInfo(identifiers.video_id);
       identifiers.channel_id = youtubeInfo.channel_id;
       identifiers.channel_handle = youtubeInfo.channel_handle;
@@ -604,29 +664,60 @@ function loadYtChannelBlacklists() {
   console.log('Fetching YouTube channel blacklists...');
   const channels = new Map();
   let total_loaded = 0;
+  
   YT_CONFIG.CHANNEL_BLACKLISTS.forEach((url, index) => {
     try {
       const listName = extractYtListName(url);
       console.log(`Loading channel list ${index + 1}/${YT_CONFIG.CHANNEL_BLACKLISTS.length} from: ${listName}`);
+      
       const response = fetchYtWithTimeout(url);
       if (response && response.getResponseCode() === 200) {
         let count = 0;
-        response.getContentText().split('\n').forEach(line => {
+        const content = response.getContentText();
+        const lines = content.split('\n');
+        
+        console.log(`  Processing ${lines.length} lines from ${listName}`);
+        
+        lines.forEach((line, lineIndex) => {
           const trimmed = line.trim();
           if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('//')) {
-            let channel_identifier = trimmed;
-            if (channel_identifier.includes('youtube.com/channel/')) {
-              const extracted_id = channel_identifier.match(/channel\/([^\/\?&]+)/)?.[1];
-              if (extracted_id && extracted_id !== '') {
-                channel_identifier = extracted_id;
+            let channel_identifier = null;
+            
+            // Handle different URL formats
+            if (trimmed.includes('youtube.com/channel/')) {
+              // Extract channel ID from: https://www.youtube.com/channel/UCvijahEyGtvMpmMHBu4FS2w
+              const match = trimmed.match(/youtube\.com\/channel\/([a-zA-Z0-9_-]+)/);
+              if (match && match[1]) {
+                channel_identifier = match[1];
               }
-            } else if (channel_identifier.includes('youtube.com/@')) {
-              const extracted_handle = channel_identifier.match(/@([^\/\?&]+)/)?.[1];
-              if (extracted_handle && extracted_handle !== '') {
-                channel_identifier = `@${extracted_handle}`;
+            } else if (trimmed.includes('youtube.com/@')) {
+              // Extract handle from: https://www.youtube.com/@yabaitshirtsyasan
+              const match = trimmed.match(/youtube\.com\/@([a-zA-Z0-9_.-]+)/);
+              if (match && match[1]) {
+                channel_identifier = `@${match[1]}`;
+              }
+            } else if (trimmed.startsWith('@')) {
+              // Handle direct handle: @yabaitshirtsyasan
+              channel_identifier = trimmed;
+            } else if (trimmed.match(/^UC[a-zA-Z0-9_-]{22}$/)) {
+              // Handle direct channel ID: UCvijahEyGtvMpmMHBu4FS2w
+              channel_identifier = trimmed;
+            } else if (trimmed.includes('youtube.com/c/')) {
+              // Handle custom URL: https://www.youtube.com/c/customname
+              const match = trimmed.match(/youtube\.com\/c\/([a-zA-Z0-9_.-]+)/);
+              if (match && match[1]) {
+                channel_identifier = `@${match[1]}`;
+              }
+            } else if (trimmed.includes('youtube.com/user/')) {
+              // Handle user URL: https://www.youtube.com/user/username
+              const match = trimmed.match(/youtube\.com\/user\/([a-zA-Z0-9_.-]+)/);
+              if (match && match[1]) {
+                channel_identifier = `@${match[1]}`;
               }
             }
-            if (channel_identifier.length > 3 && channel_identifier !== 'https://www.youtube.com/channel/') {
+            
+            // Store valid channel identifier
+            if (channel_identifier && channel_identifier.length > 3) {
               if (!channels.has(channel_identifier)) {
                 channels.set(channel_identifier, [url]);
                 count++;
@@ -638,16 +729,23 @@ function loadYtChannelBlacklists() {
               }
             }
           }
+          
+          // Progress logging for large files
+          if (lineIndex > 0 && lineIndex % 5000 === 0) {
+            console.log(`    Processed ${lineIndex} lines, found ${count} valid channels so far`);
+          }
         });
-        console.log(`  Loaded ${count} channels from ${listName}`);
+        
+        console.log(`  Successfully loaded ${count} channels from ${listName} (${lines.length} total lines)`);
         total_loaded += count;
       } else {
         throw new Error(`HTTP ${response ? response.getResponseCode() : 'unknown'}`);
       }
     } catch (error) {
-      console.warn(`Failed to load channel list from ${url}:`, error);
+      console.error(`Failed to load channel list from ${url}:`, error);
     }
   });
+  
   console.log(`Total unique blacklisted channels loaded: ${channels.size} (${total_loaded} total entries processed)`);
   return channels;
 }
@@ -774,6 +872,7 @@ function fetchYtPmaxPlacements() {
       ORDER BY metrics.impressions DESC
     `;
     const placements = [];
+    
     if (typeof AdsManagerApp !== 'undefined') {
       const account_iterator = AdsManagerApp.accounts().get();
       while (account_iterator.hasNext()) {
@@ -800,7 +899,8 @@ function fetchYtPmaxPlacements() {
               reference_list: '',
               channel_id: null,
               channel_handle: null,
-              video_id: null
+              video_id: null,
+              channel_url: null
             });
           }
         } catch (error) {
@@ -829,7 +929,8 @@ function fetchYtPmaxPlacements() {
             reference_list: '',
             channel_id: null,
             channel_handle: null,
-            video_id: null
+            video_id: null,
+            channel_url: null
           });
         }
       } catch (error) {
@@ -916,6 +1017,13 @@ function checkChannelBlacklist(placement) {
   placement.channel_handle = identifiers.channel_handle;
   placement.video_id = identifiers.video_id;
   
+  // Set channel URL based on available identifier (prefer handle for newer channels)
+  if (placement.channel_handle) {
+    placement.channel_url = `https://www.youtube.com/@${placement.channel_handle}`;
+  } else if (placement.channel_id) {
+    placement.channel_url = `https://www.youtube.com/channel/${placement.channel_id}`;
+  }
+  
   // Check channel ID (exact match)
   if (identifiers.channel_id && yt_channel_blacklist.has(identifiers.channel_id)) {
     const sources = yt_channel_blacklist.get(identifiers.channel_id);
@@ -926,7 +1034,7 @@ function checkChannelBlacklist(placement) {
     return true;
   }
   
-  // Check channel handle with @ prefix
+  // Check channel handle with @ prefix (primary method for handles)
   if (identifiers.channel_handle) {
     const handle_with_at = `@${identifiers.channel_handle}`;
     if (yt_channel_blacklist.has(handle_with_at)) {
@@ -938,7 +1046,7 @@ function checkChannelBlacklist(placement) {
       return true;
     }
     
-    // Also check without @ prefix
+    // Also check without @ prefix for legacy compatibility
     if (yt_channel_blacklist.has(identifiers.channel_handle)) {
       const sources = yt_channel_blacklist.get(identifiers.channel_handle);
       const source_names = sources.map(source => extractYtListName(source));
@@ -949,21 +1057,34 @@ function checkChannelBlacklist(placement) {
     }
   }
   
-  // Fuzzy matching for handles in URLs
+  // Enhanced fuzzy matching for URLs in placement data
   const sources = [placement.target_url, placement.placement].filter(Boolean);
   for (const source of sources) {
+    const sourceStr = String(source).toLowerCase();
+    
     for (const [identifier, blacklist_sources] of yt_channel_blacklist) {
+      let matched = false;
+      
       if (identifier.startsWith('@')) {
-        const handle_without_at = identifier.substring(1);
-        if (source.toLowerCase().includes(`@${handle_without_at.toLowerCase()}`) ||
-            source.toLowerCase().includes(`/c/${handle_without_at.toLowerCase()}`) ||
-            source.toLowerCase().includes(`/user/${handle_without_at.toLowerCase()}`)) {
-          const source_names = blacklist_sources.map(source => extractYtListName(source));
-          placement.action = 'EXCLUDE';
-          placement.reason = `excluded channel (fuzzy match): ${identifier}`;
-          placement.reference_list = source_names.join(', ');
-          return true;
+        const handle_without_at = identifier.substring(1).toLowerCase();
+        if (sourceStr.includes(`@${handle_without_at}`) ||
+            sourceStr.includes(`/c/${handle_without_at}`) ||
+            sourceStr.includes(`/user/${handle_without_at}`)) {
+          matched = true;
         }
+      } else if (identifier.match(/^UC[a-zA-Z0-9_-]{22}$/)) {
+        // Channel ID matching
+        if (sourceStr.includes(`/channel/${identifier.toLowerCase()}`)) {
+          matched = true;
+        }
+      }
+      
+      if (matched) {
+        const source_names = blacklist_sources.map(source => extractYtListName(source));
+        placement.action = 'EXCLUDE';
+        placement.reason = `excluded channel (fuzzy match): ${identifier}`;
+        placement.reference_list = source_names.join(', ');
+        return true;
       }
     }
   }
@@ -981,6 +1102,13 @@ function analyzeYtPlacements(placements) {
     placement.video_id = identifiers.video_id;
     placement.channel_id = identifiers.channel_id;
     placement.channel_handle = identifiers.channel_handle;
+    
+    // Set channel URL based on available identifier
+    if (placement.channel_id) {
+      placement.channel_url = `https://www.youtube.com/channel/${placement.channel_id}`;
+    } else if (placement.channel_handle) {
+      placement.channel_url = `https://www.youtube.com/@${placement.channel_handle}`;
+    }
     
     if (checkMccVideoExclusion(placement)) return;
     if (checkNegativeTerms(placement)) return;
@@ -1066,9 +1194,12 @@ function outputYtRawData(sheet, placements) {
     'Customer Name',
     'Video ID',
     'Channel ID',
-    'Channel Handle'
+    'Channel Handle',
+    'Channel URL'
   ];
+  
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  
   const data = placements.map(placement => [
     placement.target_url,
     placement.placement,
@@ -1081,11 +1212,14 @@ function outputYtRawData(sheet, placements) {
     placement.customer_name,
     placement.video_id || '',
     placement.channel_id || '',
-    placement.channel_handle || ''
+    placement.channel_handle ? `@${placement.channel_handle}` : '',
+    placement.channel_url || ''
   ]);
+  
   if (data.length > 0) {
     sheet.getRange(2, 1, data.length, headers.length).setValues(data);
   }
+  
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
   sheet.autoResizeColumns(1, headers.length);
 }
@@ -1093,7 +1227,8 @@ function outputYtRawData(sheet, placements) {
 function outputYtAnalysisData(sheet, placements, timings, start_time) {
   sheet.clear();
   const total_time = new Date() - start_time;
-  const excluded_count = placements.filter(p => p.action === 'EXCLUDE').length;
+  const excluded_placements = placements.filter(p => p.action === 'EXCLUDE');
+  const excluded_count = excluded_placements.length;
   const current_datetime = getCurrentEstDatetime();
   const dateRange = getYtDateRange(YT_CONFIG.DATES_BACK);
   const unique_customers = [...new Set(placements.map(p => `${p.customer_name} - ${p.customer_id}`))];
@@ -1102,13 +1237,18 @@ function outputYtAnalysisData(sheet, placements, timings, start_time) {
   // Get cache statistics for display
   const cacheStats = youtubeChannelCache.getStats();
   
+  // Calculate correct blacklist stats
+  const total_blacklist_channels = yt_channel_blacklist.size;
+  const total_blacklist_videos = mcc_video_exclusions.size;
+  const total_negative_terms = negative_terms.size;
+  
   const summary_data = [
     [`Account: ${customer_display}`],
     [`YouTube Script Last Refresh: ${current_datetime}`],
     [`Script Total Runtime: ${(total_time / 1000).toFixed(2)} seconds`],
     [`Date Range: ${dateRange.startDate} to ${dateRange.endDate}`],
     [`Total YouTube Placements: ${placements.length} | Recommended Exclusions: ${excluded_count}`],
-    [`Blacklist Stats: ${yt_channel_blacklist.size} channels, ${mcc_video_exclusions.size} videos, ${negative_terms.size} terms`],
+    [`Blacklist Stats: ${total_blacklist_channels} channels, ${total_blacklist_videos} videos, ${total_negative_terms} terms`],
     [`Analysis: N-gram range ${YT_CONFIG.MIN_NGRAM}-${YT_CONFIG.MAX_NGRAM}, Min term length: ${YT_CONFIG.MIN_TERM_LENGTH} | YouTube fetches: ${youtube_fetch_count}`],
     [`Cache: ${cacheStats.hitRate} hit rate, ${cacheStats.hits} hits, ${cacheStats.misses} misses, 4-week retention`]
   ];
@@ -1117,38 +1257,47 @@ function outputYtAnalysisData(sheet, placements, timings, start_time) {
   });
   sheet.getRange(1, 1, 1, 1).setFontWeight('bold');
   sheet.getRange(2, 1, 4, 1).setFontStyle('italic');
+  
   const header_row = 10;
   const headers = [
     'Campaign ID',
     'Placement Type',
     'Video/Channel',
-    'Impr.',
     'Display Name',
+    'Impr.',
     'Action',
     'Reason',
     'Reference List',
     'Video ID',
-    'Channel ID'
+    'Channel ID',
+    'Channel Handle',
+    'Channel URL'
   ];
+  
   sheet.getRange(header_row, 1, 1, headers.length).setValues([headers]);
   const header_range = sheet.getRange(header_row, 1, 1, headers.length);
   header_range.setFontWeight('bold');
   header_range.setBackground('#d9d9d9');
   header_range.setWrap(true);
-  if (placements.length > 0) {
-    const data = placements.map(placement => [
+  
+  if (excluded_placements.length > 0) {
+    const data = excluded_placements.map(placement => [
       placement.campaign_id || '',
       placement.placement_type || '',
       placement.target_url || '',
-      placement.impressions || 0,
       placement.display_name || '',
-      placement.action || 'NEUTRAL',
+      placement.impressions || 0,
+      placement.action || 'EXCLUDE',
       placement.reason || '',
       placement.reference_list || '',
       placement.video_id || '',
-      placement.channel_id || ''
+      placement.channel_id || '',
+      placement.channel_handle ? `@${placement.channel_handle}` : '',
+      placement.channel_url || ''
     ]);
+    
     sheet.getRange(header_row + 1, 1, data.length, headers.length).setValues(data);
+    
     const action_range = sheet.getRange(header_row + 1, 6, data.length, 1);
     const exclude_rule = SpreadsheetApp.newConditionalFormatRule()
       .whenTextEqualTo('EXCLUDE')
@@ -1158,13 +1307,20 @@ function outputYtAnalysisData(sheet, placements, timings, start_time) {
     const rules = sheet.getConditionalFormatRules();
     rules.push(exclude_rule);
     sheet.setConditionalFormatRules(rules);
-    sheet.setColumnWidth(3, 300);
-    sheet.setColumnWidth(5, 250);
-    sheet.setColumnWidth(7, 300);
-    sheet.setColumnWidth(8, 200);
+    
+    // Set column widths
+    sheet.setColumnWidth(3, 300);  // Video/Channel
+    sheet.setColumnWidth(4, 250);  // Display Name
+    sheet.setColumnWidth(7, 200);  // Reason
+    sheet.setColumnWidth(8, 300);  // Reference List
+    sheet.setColumnWidth(11, 200); // Channel Handle
+    sheet.setColumnWidth(12, 300); // Channel URL
   }
-  [1, 2, 4, 6, 9, 10].forEach(col => sheet.autoResizeColumn(col));
-  console.log(`Output ${placements.length} YouTube rows to yt-exclusions sheet`);
+  
+  // Auto-resize specific columns
+  [1, 2, 5, 6, 9, 10].forEach(col => sheet.autoResizeColumn(col));
+  
+  console.log(`Output ${excluded_placements.length} EXCLUDE YouTube rows to yt-exclusions sheet`);
 }
 
 function outputYtReferenceLists(sheet) {
