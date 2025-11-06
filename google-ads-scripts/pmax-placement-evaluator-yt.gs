@@ -222,7 +222,7 @@ const YT_CONFIG = {
     'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/th-negatives'
   ],
   SHEET_URL: 'URL here',
-  DATES_BACK: 15,
+  DATES_BACK: 10,
   MIN_IMPRESSIONS: 2,
   BATCH_SIZE: 50,
   MAX_RETRIES: 3,
@@ -234,7 +234,7 @@ const YT_CONFIG = {
   EXACT_MATCH_REQUIRED: true,
   ENABLE_DETAILED_LOGGING: true,
   YOUTUBE_FETCH_DELAY: 1000, // Delay between YouTube page fetches
-  MAX_YOUTUBE_FETCHES: 150   // Limit to avoid timeouts
+  MAX_YOUTUBE_FETCHES: 250   // Limit to avoid timeouts
 };
 
 let yt_channel_blacklist = new Map();
@@ -414,7 +414,7 @@ function fetchYouTubeChannelInfo(videoId) {
   const cachedInfo = youtubeChannelCache.get(videoId);
   if (cachedInfo) {
     if (YT_CONFIG.ENABLE_DETAILED_LOGGING && youtube_fetch_count <= 5) {
-      console.log(`Cache HIT for video ${videoId}: ${cachedInfo.channel_id || cachedInfo.channel_handle || 'no channel info'}`);
+      console.log(`Cache HIT for video ${videoId}: ID=${cachedInfo.channel_id || 'none'}, Handle=${cachedInfo.channel_handle || 'none'}, Name=${cachedInfo.channel_name || 'none'}`);
     }
     return cachedInfo;
   }
@@ -442,13 +442,23 @@ function fetchYouTubeChannelInfo(videoId) {
     }
     
     const html = response.getContentText();
+    
+    // Debug: Check if we have the expected HTML patterns
+    if (YT_CONFIG.ENABLE_DETAILED_LOGGING && youtube_fetch_count <= 3) {
+      const hasChannelId = html.includes('"channelId"');
+      const hasOwnerChannel = html.includes('"ownerChannelName"');
+      const hasCoreString = html.includes('yt-core-attributed-string__link');
+      const hasAtSymbol = html.includes('/@');
+      console.log(`HTML patterns found - channelId: ${hasChannelId}, ownerChannel: ${hasOwnerChannel}, coreString: ${hasCoreString}, @symbol: ${hasAtSymbol}`);
+    }
+    
     const channelInfo = extractChannelFromHtml(html);
     
     // Cache the result for 4 weeks
     youtubeChannelCache.set(videoId, channelInfo);
     
     if (YT_CONFIG.ENABLE_DETAILED_LOGGING && youtube_fetch_count <= 5) {
-      console.log(`Extracted and cached: ${channelInfo.channel_id || channelInfo.channel_handle || 'no channel info'}`);
+      console.log(`Extracted and cached: ID=${channelInfo.channel_id || 'none'}, Handle=${channelInfo.channel_handle || 'none'}, Name=${channelInfo.channel_name || 'none'}`);
     }
     
     // Add delay to avoid rate limiting
@@ -469,8 +479,6 @@ function fetchYouTubeChannelInfo(videoId) {
   }
 }
 
-// Extract channel information from YouTube HTML
-// Extract channel information from YouTube HTML
 function extractChannelFromHtml(html) {
   const channelInfo = {
     channel_id: null,
@@ -479,13 +487,13 @@ function extractChannelFromHtml(html) {
   };
   
   try {
-    // Method 1: Look for channel ID in various JSON data
+    // Method 1: Look for channel ID in various JSON data (PRIORITY)
     let match = html.match(/"channelId":"([^"]+)"/);
     if (match) {
       channelInfo.channel_id = match[1];
     }
     
-    // Method 2: Look for channel ID in ownerChannelName
+    // Method 2: Look for channel ID in ownerChannelName (PRIORITY)
     if (!channelInfo.channel_id) {
       match = html.match(/"ownerChannelName":"[^"]*","externalChannelId":"([^"]+)"/);
       if (match) {
@@ -493,7 +501,7 @@ function extractChannelFromHtml(html) {
       }
     }
     
-    // Method 3: Look for UC pattern in various contexts
+    // Method 3: Look for UC pattern in various contexts (PRIORITY)
     if (!channelInfo.channel_id) {
       match = html.match(/(UC[a-zA-Z0-9_-]{22})/);
       if (match) {
@@ -501,13 +509,24 @@ function extractChannelFromHtml(html) {
       }
     }
     
-    // Method 4: Look for channel handle (@handle) - Enhanced patterns
-    match = html.match(/"canonicalChannelUrl":"[^"]*\/@([^"\/]+)"/);
-    if (match) {
-      channelInfo.channel_handle = match[1];
+    // Method 4: Simple handle extraction from href patterns
+    if (!channelInfo.channel_handle) {
+      // Look for any href="/@handle" pattern
+      match = html.match(/href=["']\/\@([a-zA-Z0-9_.-]+)["']/);
+      if (match) {
+        channelInfo.channel_handle = match[1];
+      }
     }
     
-    // Method 5: Look for channel handle in webCommandMetadata
+    // Method 5: Handle from canonical URL
+    if (!channelInfo.channel_handle) {
+      match = html.match(/"canonicalChannelUrl":"[^"]*\/@([^"\/]+)"/);
+      if (match) {
+        channelInfo.channel_handle = match[1];
+      }
+    }
+    
+    // Method 6: Handle from webCommandMetadata
     if (!channelInfo.channel_handle) {
       match = html.match(/"webCommandMetadata":{"url":"[^"]*\/@([^"\/]+)"/);
       if (match) {
@@ -515,15 +534,7 @@ function extractChannelFromHtml(html) {
       }
     }
     
-    // Method 6: Look for handle in navigationEndpoint
-    if (!channelInfo.channel_handle) {
-      match = html.match(/"navigationEndpoint":{"[^"]*":"[^"]*\/@([^"\/]+)"/);
-      if (match) {
-        channelInfo.channel_handle = match[1];
-      }
-    }
-    
-    // Method 7: Look for handle in browseEndpoint
+    // Method 7: Handle from browseEndpoint
     if (!channelInfo.channel_handle) {
       match = html.match(/"browseEndpoint":{"browseId":"@([^"\/]+)"/);
       if (match) {
@@ -531,15 +542,7 @@ function extractChannelFromHtml(html) {
       }
     }
     
-    // Method 8: Look for handle in various URL contexts
-    if (!channelInfo.channel_handle) {
-      match = html.match(/youtube\.com\/@([a-zA-Z0-9_.-]+)/);
-      if (match) {
-        channelInfo.channel_handle = match[1];
-      }
-    }
-    
-    // Method 9: Look for handle in JSON data
+    // Method 8: Handle from JSON handle field
     if (!channelInfo.channel_handle) {
       match = html.match(/"handle":"@([^"]+)"/);
       if (match) {
@@ -547,13 +550,83 @@ function extractChannelFromHtml(html) {
       }
     }
     
-    // Method 10: Look for channel name
-    match = html.match(/"ownerChannelName":"([^"]+)"/);
-    if (match) {
-      channelInfo.channel_name = match[1];
+    // Method 9: NEW - Extract channel name from yt-core-attributed-string__link
+    if (!channelInfo.channel_name) {
+      const coreStringPattern = /<a\s+class="[^"]*yt-core-attributed-string__link[^"]*"[^>]*>([^<]+)</;
+      match = html.match(coreStringPattern);
+      if (match) {
+        const name = match[1].trim();
+        if (name && name.length > 0 && name.length < 100 && !name.includes('javascript:') && !name.includes('http')) {
+          channelInfo.channel_name = name;
+        }
+      }
     }
     
-    // Method 11: Look for channel name in author
+    // Method 10: NEW - More specific pattern for the exact structure you provided
+    if (!channelInfo.channel_name) {
+      const specificPattern = /<a\s+class="yt-core-attributed-string__link\s+yt-core-attributed-string__link--call-to-action-color"[^>]*>([^<]+)/;
+      match = html.match(specificPattern);
+      if (match) {
+        const name = match[1].trim();
+        if (name && name.length > 0 && name.length < 100) {
+          channelInfo.channel_name = name;
+        }
+      }
+    }
+    
+    // Method 11: NEW - Extract from any yt-core-attributed-string link with text content
+    if (!channelInfo.channel_name) {
+      const generalCorePattern = /class="[^"]*yt-core-attributed-string[^"]*"[^>]*>([A-Za-z0-9][^<]{1,50})</;
+      match = html.match(generalCorePattern);
+      if (match) {
+        const name = match[1].trim();
+        // Filter out common non-channel text
+        if (name && 
+            name.length > 1 && 
+            name.length < 50 && 
+            !name.includes('and ') && 
+            !name.includes('more') && 
+            !name.includes('Subscribe') && 
+            !name.includes('View') && 
+            !name.includes('Watch') &&
+            !/^\d+$/.test(name) && // Not just numbers
+            !/^[^A-Za-z]*$/.test(name)) { // Contains at least one letter
+          channelInfo.channel_name = name;
+        }
+      }
+    }
+    
+    // Method 12: Extract channel name from title attributes
+    if (!channelInfo.channel_name) {
+      // Look for title="Channel Name" near channel links
+      const titlePattern = /title=["']([^"']+)["'][^>]*>.*?href=["']\/\@[^"']+["']/;
+      match = html.match(titlePattern);
+      if (match) {
+        channelInfo.channel_name = match[1];
+      }
+    }
+    
+    // Method 13: Extract channel name from link text with @handle
+    if (!channelInfo.channel_name) {
+      // Look for >Channel Name< between link tags with @handle
+      match = html.match(/href=["']\/\@[^"']+["'][^>]*>([^<]+)</);
+      if (match) {
+        const name = match[1].trim();
+        if (name && name.length > 0 && !name.includes('<') && !name.includes('>')) {
+          channelInfo.channel_name = name;
+        }
+      }
+    }
+    
+    // Method 14: Channel name from ownerChannelName JSON
+    if (!channelInfo.channel_name) {
+      match = html.match(/"ownerChannelName":"([^"]+)"/);
+      if (match) {
+        channelInfo.channel_name = match[1];
+      }
+    }
+    
+    // Method 15: Channel name from author JSON
     if (!channelInfo.channel_name) {
       match = html.match(/"author":"([^"]+)"/);
       if (match) {
@@ -561,7 +634,7 @@ function extractChannelFromHtml(html) {
       }
     }
     
-    // Method 12: Look for channel name in title
+    // Method 16: Channel name from title runs
     if (!channelInfo.channel_name) {
       match = html.match(/"title":{"runs":\[{"text":"([^"]+)"/);
       if (match) {
