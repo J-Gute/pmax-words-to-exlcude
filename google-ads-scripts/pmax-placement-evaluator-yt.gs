@@ -4,12 +4,47 @@
  * Includes 4-week caching for channel data
  */
 
+
+const YT_CONFIG = {
+  CHANNEL_BLACKLISTS: [
+    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-kids-channels',
+    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-spam-irrelevant-channels'
+  ],
+  MCC_VIDEO_EXCLUSION: 'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-mcc-vid-exclusions',
+  NEGATIVE_TERMS_LISTS: [
+    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/spam-and-irrelevant-terms',
+    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/jp-negatives',
+    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/kr-negatives',
+    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/ru-negatives',
+    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/th-negatives'
+  ],
+  SHEET_URL: 'URL here',
+  DATES_BACK: 7,
+  MIN_IMPRESSIONS: 1,
+  BATCH_SIZE: 100,
+  MAX_RETRIES: 2,
+  REQUEST_DELAY: 125,
+  MIN_NGRAM: 1,
+  MAX_NGRAM: 3,
+  MIN_TERM_LENGTH: 3,
+  MIN_PHRASE_LENGTH: 4,
+  EXACT_MATCH_REQUIRED: true,
+  ENABLE_DETAILED_LOGGING: true,
+  YOUTUBE_FETCH_DELAY: 125, 
+  
+  PROCESSING_TIMEOUT_MS: 20000,        
+  CONSECUTIVE_FAILURES_LIMIT: 5,      
+  
+  MAX_YOUTUBE_FETCHES: 2000   
+};
+
+
 const CACHE_CONFIG = {
   CACHE_DURATION_WEEKS: 4,
   CACHE_DURATION_MS: 4 * 7 * 24 * 60 * 60 * 1000,
   CACHE_KEY_PREFIX: 'yt_channel_',
   CACHE_METADATA_KEY: 'yt_cache_metadata',
-  MAX_CACHE_ENTRIES: 2000, 
+  MAX_CACHE_ENTRIES: 50000, 
   CLEANUP_INTERVAL_DAYS: 7
 };
 
@@ -208,35 +243,6 @@ class YouTubeChannelCache {
 // Global cache instance
 let youtubeChannelCache = new YouTubeChannelCache();
 
-const YT_CONFIG = {
-  CHANNEL_BLACKLISTS: [
-    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-kids-channels',
-    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-spam-irrelevant-channels'
-  ],
-  MCC_VIDEO_EXCLUSION: 'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-mcc-vid-exclusions',
-  NEGATIVE_TERMS_LISTS: [
-    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/spam-and-irrelevant-terms',
-    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/jp-negatives',
-    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/kr-negatives',
-    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/ru-negatives',
-    'https://raw.githubusercontent.com/J-Gute/pmax-placement-evaluator/refs/heads/main/yt-negative-term-phrases/th-negatives'
-  ],
-  SHEET_URL: 'URL here',
-  DATES_BACK: 10,
-  MIN_IMPRESSIONS: 2,
-  BATCH_SIZE: 50,
-  MAX_RETRIES: 3,
-  REQUEST_DELAY: 2500,
-  MIN_NGRAM: 1,
-  MAX_NGRAM: 3,
-  MIN_TERM_LENGTH: 3,
-  MIN_PHRASE_LENGTH: 4,
-  EXACT_MATCH_REQUIRED: true,
-  ENABLE_DETAILED_LOGGING: true,
-  YOUTUBE_FETCH_DELAY: 1000, // Delay between YouTube page fetches
-  MAX_YOUTUBE_FETCHES: 250   // Limit to avoid timeouts
-};
-
 let yt_channel_blacklist = new Map();
 let mcc_video_exclusions = new Set();
 let negative_terms = new Map();
@@ -351,9 +357,57 @@ function generateYtDynamicName(owner, repo, category, filename, platform) {
   return `${baseName} - ${contentType}`.trim();
 }
 
+
+function analyzeLanguageDistribution(placements) {
+  const scripts = {};
+  
+  placements.forEach(placement => {
+    if (placement.display_name) {
+      const script = detectTextScript(placement.display_name);
+      scripts[script] = (scripts[script] || 0) + 1;
+    }
+    if (placement.channel_name) {
+      const script = detectTextScript(placement.channel_name);
+      scripts[script] = (scripts[script] || 0) + 1;
+    }
+  });
+  
+  return Object.entries(scripts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([script, count]) => `${script}:${count}`)
+    .join(', ');
+}
+
+// NEW: Helper function to detect script type
+function detectTextScript(text) {
+    if (!text) return 'Unknown';
+  
+  // East Asian (Chinese, Japanese, Korean) - covers your JP/KR term lists
+  if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(text)) return 'East Asian (CN/JP/KR)';
+  
+  // Russian/Cyrillic - covers your RU term list
+  if (/[\p{Script=Cyrillic}]/u.test(text)) return 'Russian/Cyrillic';
+  
+  // Thai - covers your TH term list
+  if (/[\p{Script=Thai}]/u.test(text)) return 'Thai';
+  
+  // Arabic/Persian/Urdu
+  if (/[\p{Script=Arabic}]/u.test(text)) return 'Arabic/Persian';
+  
+  // Indian Languages (Hindi, Bengali, Tamil, etc.)
+  if (/[\p{Script=Devanagari}\p{Script=Bengali}\p{Script=Tamil}\p{Script=Telugu}\p{Script=Gujarati}\p{Script=Gurmukhi}\p{Script=Malayalam}\p{Script=Kannada}\p{Script=Oriya}]/u.test(text)) return 'Indian Languages';
+  
+  if (/[\p{Script=Latin}]/u.test(text)) return 'Western/Latin';
+  
+  // Everything else
+  return 'Other';
+}
+
+
 function capitalizeFirst(str) {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
+
 
 function fetchYtWithTimeout(url, timeoutMs = 30000) {
   let lastError;
@@ -419,6 +473,9 @@ function fetchYouTubeChannelInfo(videoId) {
     return cachedInfo;
   }
   
+  const startTime = Date.now(); // NEW: Track processing time
+  const PROCESSING_TIMEOUT = 30000; // NEW: 30 second timeout
+  
   try {
     youtube_fetch_count++;
     youtubeChannelCache.cacheStats.fetches++;
@@ -429,36 +486,48 @@ function fetchYouTubeChannelInfo(videoId) {
       console.log(`Fetching YouTube page ${youtube_fetch_count}: ${videoUrl}`);
     }
     
+    // NEW: Add timeout to UrlFetchApp
     const response = UrlFetchApp.fetch(videoUrl, {
       method: 'GET',
       muteHttpExceptions: true,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      }
+      },
+      deadline: 30 // NEW: 30 second deadline
     });
     
     if (response.getResponseCode() !== 200) {
       throw new Error(`HTTP ${response.getResponseCode()}`);
     }
     
+    // NEW: Check if we're approaching timeout
+    if (Date.now() - startTime > PROCESSING_TIMEOUT * 0.8) {
+      console.warn(`Processing timeout approaching for video ${videoId}, using partial data`);
+    }
+    
     const html = response.getContentText();
+    
+    // NEW: Limit HTML size to prevent memory issues
+    const maxHtmlSize = 5 * 1024 * 1024; // 5MB limit
+    const htmlToProcess = html.length > maxHtmlSize ? html.substring(0, maxHtmlSize) : html;
     
     // Debug: Check if we have the expected HTML patterns
     if (YT_CONFIG.ENABLE_DETAILED_LOGGING && youtube_fetch_count <= 3) {
-      const hasChannelId = html.includes('"channelId"');
-      const hasOwnerChannel = html.includes('"ownerChannelName"');
-      const hasCoreString = html.includes('yt-core-attributed-string__link');
-      const hasAtSymbol = html.includes('/@');
+      const hasChannelId = htmlToProcess.includes('"channelId"');
+      const hasOwnerChannel = htmlToProcess.includes('"ownerChannelName"');
+      const hasCoreString = htmlToProcess.includes('yt-core-attributed-string__link');
+      const hasAtSymbol = htmlToProcess.includes('/@');
       console.log(`HTML patterns found - channelId: ${hasChannelId}, ownerChannel: ${hasOwnerChannel}, coreString: ${hasCoreString}, @symbol: ${hasAtSymbol}`);
     }
     
-    const channelInfo = extractChannelFromHtml(html);
+    const channelInfo = extractChannelFromHtml(htmlToProcess);
     
     // Cache the result for 4 weeks
     youtubeChannelCache.set(videoId, channelInfo);
     
+    const processingTime = Date.now() - startTime; // NEW: Log processing time
     if (YT_CONFIG.ENABLE_DETAILED_LOGGING && youtube_fetch_count <= 5) {
-      console.log(`Extracted and cached: ID=${channelInfo.channel_id || 'none'}, Handle=${channelInfo.channel_handle || 'none'}, Name=${channelInfo.channel_name || 'none'}`);
+      console.log(`Extracted and cached (${processingTime}ms): ID=${channelInfo.channel_id || 'none'}, Handle=${channelInfo.channel_handle || 'none'}, Name=${channelInfo.channel_name || 'none'}`);
     }
     
     // Add delay to avoid rate limiting
@@ -469,7 +538,8 @@ function fetchYouTubeChannelInfo(videoId) {
     return channelInfo;
     
   } catch (error) {
-    console.warn(`Failed to fetch YouTube page for video ${videoId}:`, error);
+    const processingTime = Date.now() - startTime; // NEW
+    console.warn(`Failed to fetch YouTube page for video ${videoId} (${processingTime}ms):`, error);
     const emptyInfo = { channel_id: null, channel_handle: null, channel_name: null };
     
     // Cache empty result to avoid retrying
@@ -479,6 +549,7 @@ function fetchYouTubeChannelInfo(videoId) {
   }
 }
 
+// extract html from vid placement
 function extractChannelFromHtml(html) {
   const channelInfo = {
     channel_id: null,
@@ -654,6 +725,7 @@ function extractChannelIdentifiers(placement) {
   const identifiers = {
     channel_id: null,
     channel_handle: null,
+    channel_name: null,  // NEW
     video_id: null
   };
   
@@ -715,14 +787,11 @@ function extractChannelIdentifiers(placement) {
     }
     
     // If we didn't find channel info in placement data, fetch from YouTube page (with 4-week caching)
-    if ((!identifiers.channel_id && !identifiers.channel_handle) && identifiers.video_id) {
+     if ((!identifiers.channel_id && !identifiers.channel_handle) && identifiers.video_id) {
       const youtubeInfo = fetchYouTubeChannelInfo(identifiers.video_id);
       identifiers.channel_id = youtubeInfo.channel_id;
       identifiers.channel_handle = youtubeInfo.channel_handle;
-      // Store channel name for reference
-      if (youtubeInfo.channel_name) {
-        identifiers.channel_name = youtubeInfo.channel_name;
-      }
+      identifiers.channel_name = youtubeInfo.channel_name;  // NEW
     }
     
     return identifiers;
@@ -943,6 +1012,7 @@ function fetchYtPmaxPlacements() {
         AND segments.date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'
         AND performance_max_placement_view.placement_type IN ('YOUTUBE_VIDEO', 'YOUTUBE_CHANNEL')
       ORDER BY metrics.impressions DESC
+      LIMIT 2000
     `;
     const placements = [];
     
@@ -1046,18 +1116,39 @@ function checkMccVideoExclusion(placement) {
 
 function generateNgrams(text, minN = 1, maxN = 3) {
   const ngrams = new Set();
+  
+  // Enhanced tokenization supporting non-Latin characters
   const words = text.toLowerCase()
-    .replace(/[^\w\s]/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')  // Keep Unicode letters and numbers
     .split(/\s+/)
-    .filter(word => word.length > 0);
+    .filter(word => {
+      if (!word || word.length === 0) return false;
+      
+      // For CJK characters, allow single characters
+      if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(word)) {
+        return word.length >= 1;
+      }
+      
+      // For other scripts, require minimum length
+      return word.length >= YT_CONFIG.MIN_TERM_LENGTH;
+    });
+  
   for (let n = minN; n <= maxN; n++) {
     for (let i = 0; i <= words.length - n; i++) {
       const ngram = words.slice(i, i + n).join(' ');
-      if (ngram.length >= YT_CONFIG.MIN_TERM_LENGTH) {
+      
+      // Adjust minimum length check for different scripts
+      let minLength = YT_CONFIG.MIN_TERM_LENGTH;
+      if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(ngram)) {
+        minLength = 1; // CJK characters can be single character terms
+      }
+      
+      if (ngram.length >= minLength) {
         ngrams.add(ngram);
       }
     }
   }
+  
   return Array.from(ngrams);
 }
 
@@ -1170,22 +1261,52 @@ function analyzeYtPlacements(placements) {
   console.log(`Will fetch channel data from YouTube for up to ${Math.min(placements.length, YT_CONFIG.MAX_YOUTUBE_FETCHES)} videos`);
   console.log(`4-week cache enabled - cache stats will be shown at the end`);
   
+  const totalPlacements = placements.length;
+  let consecutiveFailures = 0;
+  const MAX_CONSECUTIVE_FAILURES = 5;
+  
   placements.forEach((placement, index) => {
-    const identifiers = extractChannelIdentifiers(placement);
-    placement.video_id = identifiers.video_id;
-    placement.channel_id = identifiers.channel_id;
-    placement.channel_handle = identifiers.channel_handle;
-    
-    // Set channel URL based on available identifier
-    if (placement.channel_id) {
-      placement.channel_url = `https://www.youtube.com/channel/${placement.channel_id}`;
-    } else if (placement.channel_handle) {
-      placement.channel_url = `https://www.youtube.com/@${placement.channel_handle}`;
+    try {
+      const startTime = Date.now();
+      
+      // Progress logging every 10 placements
+      if (index > 0 && index % 10 === 0) {
+        console.log(`Progress: ${index}/${totalPlacements} placements processed (${youtube_fetch_count} YouTube fetches)`);
+      }
+      
+      const identifiers = extractChannelIdentifiers(placement);
+      placement.video_id = identifiers.video_id;
+      placement.channel_id = identifiers.channel_id;
+      placement.channel_handle = identifiers.channel_handle;
+      placement.channel_name = identifiers.channel_name;
+      
+      // Set channel URL based on available identifier
+      if (placement.channel_id) {
+        placement.channel_url = `https://www.youtube.com/channel/${placement.channel_id}`;
+      } else if (placement.channel_handle) {
+        placement.channel_url = `https://www.youtube.com/@${placement.channel_handle}`;
+      }
+      
+      if (checkMccVideoExclusion(placement)) return;
+      if (checkNegativeTerms(placement)) return;
+      if (checkChannelBlacklist(placement)) return;
+      
+      const processingTime = Date.now() - startTime;
+      if (processingTime > 10000) { // Warn if processing takes > 10 seconds
+        console.warn(`Slow processing for placement ${index}: ${processingTime}ms`);
+      }
+      
+      consecutiveFailures = 0; // Reset on success
+      
+    } catch (error) {
+      consecutiveFailures++;
+      console.warn(`Error processing placement ${index}:`, error);
+      
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.error(`Too many consecutive failures (${consecutiveFailures}), stopping analysis`);
+        return;
+      }
     }
-    
-    if (checkMccVideoExclusion(placement)) return;
-    if (checkNegativeTerms(placement)) return;
-    if (checkChannelBlacklist(placement)) return;
   });
   
   const excluded_count = placements.filter(p => p.action === 'EXCLUDE').length;
@@ -1268,6 +1389,7 @@ function outputYtRawData(sheet, placements) {
     'Video ID',
     'Channel ID',
     'Channel Handle',
+    'Channel Name',  // NEW
     'Channel URL'
   ];
   
@@ -1286,6 +1408,7 @@ function outputYtRawData(sheet, placements) {
     placement.video_id || '',
     placement.channel_id || '',
     placement.channel_handle ? `@${placement.channel_handle}` : '',
+    placement.channel_name || '',  // NEW
     placement.channel_url || ''
   ]);
   
@@ -1314,6 +1437,7 @@ function outputYtAnalysisData(sheet, placements, timings, start_time) {
   const total_blacklist_channels = yt_channel_blacklist.size;
   const total_blacklist_videos = mcc_video_exclusions.size;
   const total_negative_terms = negative_terms.size;
+  const languageStats = analyzeLanguageDistribution(placements);
   
   const summary_data = [
     [`Account: ${customer_display}`],
@@ -1323,15 +1447,17 @@ function outputYtAnalysisData(sheet, placements, timings, start_time) {
     [`Total YouTube Placements: ${placements.length} | Recommended Exclusions: ${excluded_count}`],
     [`Blacklist Stats: ${total_blacklist_channels} channels, ${total_blacklist_videos} videos, ${total_negative_terms} terms`],
     [`Analysis: N-gram range ${YT_CONFIG.MIN_NGRAM}-${YT_CONFIG.MAX_NGRAM}, Min term length: ${YT_CONFIG.MIN_TERM_LENGTH} | YouTube fetches: ${youtube_fetch_count}`],
-    [`Cache: ${cacheStats.hitRate} hit rate, ${cacheStats.hits} hits, ${cacheStats.misses} misses, 4-week retention`]
+    [`Cache: ${cacheStats.hitRate} hit rate, ${cacheStats.hits} hits, ${cacheStats.misses} misses, 4-week retention`],
+    [`Language Distribution: ${languageStats}`] 
   ];
+  
   summary_data.forEach((row, index) => {
     sheet.getRange(index + 1, 1, 1, 1).setValue(row[0]);
   });
   sheet.getRange(1, 1, 1, 1).setFontWeight('bold');
   sheet.getRange(2, 1, 4, 1).setFontStyle('italic');
   
-  const header_row = 10;
+  const header_row = 11;
   const headers = [
     'Campaign ID',
     'Placement Type',
@@ -1344,6 +1470,7 @@ function outputYtAnalysisData(sheet, placements, timings, start_time) {
     'Video ID',
     'Channel ID',
     'Channel Handle',
+    'Channel Name',  // NEW
     'Channel URL'
   ];
   
@@ -1366,6 +1493,7 @@ function outputYtAnalysisData(sheet, placements, timings, start_time) {
       placement.video_id || '',
       placement.channel_id || '',
       placement.channel_handle ? `@${placement.channel_handle}` : '',
+      placement.channel_name || '',  // NEW
       placement.channel_url || ''
     ]);
     
@@ -1384,10 +1512,11 @@ function outputYtAnalysisData(sheet, placements, timings, start_time) {
     // Set column widths
     sheet.setColumnWidth(3, 300);  // Video/Channel
     sheet.setColumnWidth(4, 250);  // Display Name
-    sheet.setColumnWidth(7, 200);  // Reason
+    sheet.setColumnWidth(7, 250);  // Reason
     sheet.setColumnWidth(8, 300);  // Reference List
-    sheet.setColumnWidth(11, 200); // Channel Handle
-    sheet.setColumnWidth(12, 300); // Channel URL
+    sheet.setColumnWidth(11, 175); // Channel Handle
+    sheet.setColumnWidth(12, 175); // Channel Name (NEW)
+    sheet.setColumnWidth(13, 300); // Channel URL
   }
   
   // Auto-resize specific columns
