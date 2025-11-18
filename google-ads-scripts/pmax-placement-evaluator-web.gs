@@ -63,7 +63,7 @@ const CONFIG = {
   FILTER_OUT_TLDS: ['com', 'org', 'edu', 'de', 'uk', 'fr', 'jp', 'kr', 'us', 'es', 'ch', 'ir', 'pl'],
   OPR_API_KEY: 'API key here',
   OPR_BATCH_SIZE: 100,
-  OPR_ENABLED: true,
+  OPR_ENABLED: false,
 };
 
 // Global variables for blacklists with source tracking
